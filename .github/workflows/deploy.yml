@@ -36,11 +36,16 @@ jobs:
         env:
           BASE_PATH: /${{ github.event.repository.name }}/
 
+      # 【初回のみ手作業が要る】
+      # リポジトリ設定 → Pages → Build and deployment → Source を
+      # "GitHub Actions" にしておくこと。未設定だとここで
+      # "Get Pages site failed" となり以降のステップが飛ぶ。
+      #
+      # enablement: true で自動作成も試すが、Actions の既定トークンには
+      # Pages を新規作成する権限が無く "Resource not accessible by
+      # integration" で失敗する。有効化後はこの指定は素通りする。
       - uses: actions/configure-pages@v5
         with:
-          # 未設定なら Pages を自動で有効化する。
-          # これが無いと初回は必ず "Get Pages site failed" で落ち、
-          # リポジトリ設定を手で開く必要がある。
           enablement: true
 
       - uses: actions/upload-pages-artifact@v3
