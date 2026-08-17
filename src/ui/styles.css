@@ -439,3 +439,147 @@ details.settings > div {
   clip: rect(0 0 0 0);
   white-space: nowrap;
 }
+
+/* ── 読み取り方式の切り替え ───────────────────────────── */
+
+.modes {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.5rem;
+  margin: 1.25rem 0;
+}
+
+.mode {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding: 0.7rem 0.6rem;
+  text-align: left;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  cursor: pointer;
+}
+
+.mode[aria-pressed='true'] {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.mode:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.mode-title {
+  font-size: 0.92rem;
+}
+
+.mode-note {
+  font-size: 0.72rem;
+  color: var(--muted);
+  line-height: 1.35;
+}
+
+/* ── バーコードスキャナ ───────────────────────────────── */
+
+.scanner {
+  margin: 1rem 0 1.5rem;
+  padding: 0.85rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.scanner-view {
+  position: relative;
+  overflow: hidden;
+  border-radius: var(--radius);
+  background: #000;
+  /* 縦長端末でも横幅いっぱいに使い、バーコードを大きく写す */
+  aspect-ratio: 4 / 3;
+}
+
+.scanner-view video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+/* 走査帯。grabCenterBand の切り出し範囲(中央45%)と一致させる */
+.scanner-band {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 27.5%;
+  height: 45%;
+  border-top: 2px solid rgba(255, 255, 255, 0.85);
+  border-bottom: 2px solid rgba(255, 255, 255, 0.85);
+  background: rgba(255, 255, 255, 0.06);
+  transition: background 0.15s, border-color 0.15s;
+  pointer-events: none;
+}
+
+.scanner-band[data-hit='new'] {
+  background: rgba(34, 160, 90, 0.32);
+  border-color: rgba(34, 160, 90, 0.95);
+}
+
+.scanner-band[data-hit='dup'] {
+  background: rgba(190, 150, 30, 0.28);
+  border-color: rgba(190, 150, 30, 0.95);
+}
+
+.scanner-status,
+.scanner-toast {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  margin: 0;
+  padding: 0.35rem 0.7rem;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.62);
+  white-space: nowrap;
+}
+
+.scanner-status {
+  top: 50%;
+  transform: translate(-50%, -50%);
+}
+
+.scanner-toast {
+  bottom: 0.6rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.scanner-toast[data-dup='true'] {
+  background: rgba(150, 110, 10, 0.85);
+}
+
+.scanner-count {
+  margin-top: 0.7rem;
+  font-size: 0.85rem;
+}
+
+.scanner-count strong {
+  font-size: 1.15rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.scanner-recent {
+  display: block;
+  margin-top: 0.2rem;
+  font-size: 0.72rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.scanner-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.8rem;
+  flex-wrap: wrap;
+}

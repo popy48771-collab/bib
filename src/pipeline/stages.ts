@@ -92,6 +92,27 @@ export function entriesFromExtraction(
   }))
 }
 
+/**
+ * バーコードで読んだ ISBN から BookEntry を作る。
+ *
+ * ISBN は既に確実なので resolved に入れておく(出典は barcode)。
+ * ただし書名はまだ判らないので status は unverified のまま。
+ * 次段の Google Books 照合で書誌が埋まり、そこで確定する。
+ */
+export function entriesFromIsbns(isbns: readonly string[], idPrefix: string): BookEntry[] {
+  return isbns.map((isbn13, i) => ({
+    id: `${idPrefix}-${i}`,
+    photoId: idPrefix,
+    rawText: isbn13,
+    extracted: { title: '', authors: [] },
+    candidates: {},
+    resolved: { title: '', authors: [], isbn13, source: 'barcode' as const },
+    provenance: { isbn13: 'barcode' as const },
+    status: 'unverified' as const,
+    pinned: false,
+  }))
+}
+
 // ───────────────────────────────────────────────────────────
 // 段階 1: Google Books 照合
 // ───────────────────────────────────────────────────────────
@@ -144,21 +165,33 @@ export async function runGoogleBooksStage(
     }
 
     try {
-      const records = await googleBooks.searchByTitle(
-        entry.extracted.title || entry.rawText,
-        entry.extracted.authors,
-        { country: ctx.settings.googleBooksCountry, signal: ctx.signal },
-      )
-      const scored = scoreCandidates(entry, records)
-      const top = scored[0]
+      // ISBN が既に判っている(バーコード経路)なら ISBN で引く。
+      // 完全一致なので、タイトル類似度による絞り込みは不要かつ有害
+      const knownIsbn = entry.provenance.isbn13 === 'barcode' ? entry.resolved?.isbn13 : undefined
 
-      let next: BookEntry = {
-        ...entry,
-        candidates: { ...entry.candidates, googleBooks: scored },
-        status: statusFromScore(top),
+      if (knownIsbn) {
+        const records = await googleBooks.searchByIsbn(knownIsbn, {
+          country: ctx.settings.googleBooksCountry,
+          signal: ctx.signal,
+        })
+        out.push(mergeIsbnResult(entry, knownIsbn, scoreIsbnCandidates(knownIsbn, records)))
+      } else {
+        const records = await googleBooks.searchByTitle(
+          entry.extracted.title || entry.rawText,
+          entry.extracted.authors,
+          { country: ctx.settings.googleBooksCountry, signal: ctx.signal },
+        )
+        const scored = scoreCandidates(entry, records)
+        const top = scored[0]
+
+        let next: BookEntry = {
+          ...entry,
+          candidates: { ...entry.candidates, googleBooks: scored },
+          status: statusFromScore(top),
+        }
+        if (top) next = { ...adoptCandidate(next, top), status: next.status }
+        out.push(next)
       }
-      if (top) next = { ...adoptCandidate(next, top), status: next.status }
-      out.push(next)
     } catch (err) {
       if (err instanceof DOMException && err.name === 'AbortError') throw err
       // 1件の失敗で全体を止めない。未確認のまま残す
@@ -170,6 +203,48 @@ export async function runGoogleBooksStage(
     if (done < entries.length) await delay(GOOGLE_BOOKS_INTERVAL_MS, ctx.signal)
   }
   return out
+}
+
+/**
+ * ISBN 検索の結果に点を付ける。
+ * `isbn:` クエリの戻りはその ISBN の本そのものなので、類似度計算はしない。
+ * ISBN が一致したものを最上位に置くだけ。
+ */
+export function scoreIsbnCandidates(isbn13: string, records: BibRecord[]): ScoredCandidate[] {
+  return records
+    .map((record) => ({ record, score: record.isbn13 === isbn13 ? 1 : 0.9 }))
+    .sort((a, b) => b.score - a.score)
+}
+
+/**
+ * ISBN 経路の結果を統合する。
+ *
+ * バーコードは誤読がほぼ無いので、書誌が引けた時点で確定してよい。
+ * 背表紙OCR経路と違って人間のトリアージを挟まないのが、この経路の値打ち。
+ */
+export function mergeIsbnResult(
+  entry: BookEntry,
+  isbn13: string,
+  scored: ScoredCandidate[],
+): BookEntry {
+  const next: BookEntry = { ...entry, candidates: { ...entry.candidates, googleBooks: scored } }
+  const top = scored[0]
+
+  // ISBN は読めたが書誌DBに無い。ISBN は確かなので捨てず、未確認として残す
+  if (!top) return { ...next, status: 'notFound' }
+
+  const adopted = adoptCandidate(next, top)
+  const resolved: BibRecord = { ...adopted.resolved! }
+  const provenance = { ...adopted.provenance }
+
+  // Google Books のレコードは ISBN を持たないことがある。
+  // バーコードで読んだ値の方が確実なので、欠けていれば埋め戻す
+  if (!resolved.isbn13) {
+    resolved.isbn13 = isbn13
+    provenance.isbn13 = 'barcode'
+  }
+
+  return { ...adopted, resolved, provenance, status: 'confirmed' }
 }
 
 // ───────────────────────────────────────────────────────────

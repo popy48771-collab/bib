@@ -8,12 +8,17 @@ import {
   runOpenBdStage,
   type StageContext,
 } from './pipeline/stages'
+import { entriesFromIsbns } from './pipeline/stages'
 import { extractSpines, isVlmConfigured } from './sources/vlm'
 import { isNdlConfigured } from './sources/ndl'
 import { loadSettings, saveSettings, listEntries, saveEntries, clearEntries } from './lib/db'
 import { SettingsPanel } from './ui/SettingsPanel'
 import { BookList } from './ui/BookList'
 import { ExportPanel } from './ui/ExportPanel'
+import { BarcodeScanner } from './ui/BarcodeScanner'
+
+/** 読み取り方式。どちらも同じ書誌パイプラインへ合流する */
+type InputMode = 'barcode' | 'spine'
 
 interface StageState {
   status: StageStatus
@@ -40,6 +45,9 @@ export function App() {
   const [entries, setEntries] = useState<BookEntry[]>([])
   const [stages, setStages] = useState<Record<StageId, StageState>>(INITIAL_STAGES)
   const [error, setError] = useState<string | null>(null)
+  // 既定はバーコード。APIキーが要らず課金も発生しないので、初見でも必ず動く
+  const [inputMode, setInputMode] = useState<InputMode>('barcode')
+  const [scanning, setScanning] = useState(false)
   const abortRef = useRef<AbortController | null>(null)
 
   // 起動時に前回の続きを復元する。段階を分けた以上、中断からの再開は必須
@@ -151,6 +159,31 @@ export function App() {
     [entries, settings, commit, setStage],
   )
 
+  // ── バーコードからの取り込み ──────────────────────────
+  /** 既に一覧にある ISBN。スキャナ側の重複検知に渡す */
+  const knownIsbns = useMemo(
+    () => new Set(entries.map((e) => e.resolved?.isbn13).filter((v): v is string => !!v)),
+    [entries],
+  )
+
+  const onScanned = useCallback(
+    (isbns: string[]) => {
+      setScanning(false)
+      if (isbns.length === 0) return
+      setError(null)
+      commit([...entries, ...entriesFromIsbns(isbns, newId())])
+      // ISBN は手に入ったが書誌はまだ空。照合段階を促すため done にはしない
+      setStage('extract', { status: 'done' })
+      setStages((p) => ({
+        ...p,
+        googleBooks: { status: 'idle' },
+        ndl: { status: 'idle' },
+        openbd: { status: 'idle' },
+      }))
+    },
+    [entries, commit, setStage],
+  )
+
   // ── 手動操作 ────────────────────────────────────────
   const onAdopt = useCallback(
     (entryId: string, candidate: ScoredCandidate) => {
@@ -206,39 +239,47 @@ export function App() {
     {
       id: 'extract',
       n: 1,
-      title: '写真から背表紙を読み取る',
-      desc: vlmReady
-        ? '本棚の写真を選ぶと、背表紙のタイトル・著者を読み取ります。1段ずつ撮ると精度が上がります。'
-        : 'APIキーが未設定です。設定を開いて登録してください。',
-      action: (
-        <label className="primary" style={{ margin: 0 }}>
-          <span
-            style={{
-              display: 'inline-block',
-              padding: '0.45rem 0.9rem',
-              borderRadius: 7,
-              background: vlmReady && !busy ? 'var(--accent)' : 'var(--border)',
-              color: vlmReady && !busy ? '#fff' : 'var(--muted)',
-              cursor: vlmReady && !busy ? 'pointer' : 'not-allowed',
-              fontSize: '0.88rem',
-              fontWeight: 400,
-            }}
-          >
-            写真を選ぶ
-          </span>
-          <input
-            type="file"
-            accept="image/*"
-            multiple
-            className="visually-hidden"
-            disabled={!vlmReady || busy}
-            onChange={(e) => {
-              void onPickPhotos(e.target.files)
-              e.target.value = ''
-            }}
-          />
-        </label>
-      ),
+      title: inputMode === 'barcode' ? 'バーコードを読み取る' : '写真から背表紙を読み取る',
+      desc:
+        inputMode === 'barcode'
+          ? 'カメラをバーコードにかざすだけで次々に読み取ります。APIキー不要・通信なし・課金なしで、誤読もほぼありません。'
+          : vlmReady
+            ? '本棚の写真を選ぶと、背表紙のタイトル・著者を読み取ります。1段ずつ画面いっぱいに撮ると精度が上がります。'
+            : 'この方式にはAPIキーが必要です。設定を開いて登録するか、バーコード方式に切り替えてください。',
+      action:
+        inputMode === 'barcode' ? (
+          <button className="primary" disabled={busy} onClick={() => setScanning(true)}>
+            カメラを起動
+          </button>
+        ) : (
+          <label className="primary" style={{ margin: 0 }}>
+            <span
+              style={{
+                display: 'inline-block',
+                padding: '0.45rem 0.9rem',
+                borderRadius: 7,
+                background: vlmReady && !busy ? 'var(--accent)' : 'var(--border)',
+                color: vlmReady && !busy ? '#fff' : 'var(--muted)',
+                cursor: vlmReady && !busy ? 'pointer' : 'not-allowed',
+                fontSize: '0.88rem',
+                fontWeight: 400,
+              }}
+            >
+              写真を選ぶ
+            </span>
+            <input
+              type="file"
+              accept="image/*"
+              multiple
+              className="visually-hidden"
+              disabled={!vlmReady || busy}
+              onChange={(e) => {
+                void onPickPhotos(e.target.files)
+                e.target.value = ''
+              }}
+            />
+          </label>
+        ),
     },
     {
       id: 'googleBooks',
@@ -297,6 +338,43 @@ export function App() {
       <SettingsPanel settings={settings} onChange={updateSettings} />
 
       {error && <div className="notice error">{error}</div>}
+
+      {/*
+        読み取り方式の切り替え。
+        バーコードは課金ゼロ・高精度だが1冊ずつ手に取る必要があり、
+        背表紙は棚を撮るだけで済むがAPIキーと従量課金が要る。
+        どちらが良いかは状況で変わるので、利用者に選ばせる。
+      */}
+      <div className="modes" role="group" aria-label="読み取り方式">
+        <button
+          className="mode"
+          aria-pressed={inputMode === 'barcode'}
+          disabled={busy}
+          onClick={() => setInputMode('barcode')}
+        >
+          <span className="mode-title">バーコード</span>
+          <span className="mode-note">課金なし・高精度／1冊ずつ</span>
+        </button>
+        <button
+          className="mode"
+          aria-pressed={inputMode === 'spine'}
+          disabled={busy}
+          onClick={() => setInputMode('spine')}
+        >
+          <span className="mode-title">背表紙の写真</span>
+          <span className="mode-note">
+            {vlmReady ? '棚ごと一度に／APIキー必要' : 'APIキー未設定'}
+          </span>
+        </button>
+      </div>
+
+      {scanning && (
+        <BarcodeScanner
+          knownIsbns={knownIsbns}
+          onDone={onScanned}
+          onCancel={() => setScanning(false)}
+        />
+      )}
 
       <div className="stages">
         {stageDefs.map((s) => {
