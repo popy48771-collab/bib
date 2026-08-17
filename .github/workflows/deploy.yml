@@ -37,6 +37,11 @@ jobs:
           BASE_PATH: /${{ github.event.repository.name }}/
 
       - uses: actions/configure-pages@v5
+        with:
+          # 未設定なら Pages を自動で有効化する。
+          # これが無いと初回は必ず "Get Pages site failed" で落ち、
+          # リポジトリ設定を手で開く必要がある。
+          enablement: true
 
       - uses: actions/upload-pages-artifact@v3
         with:
