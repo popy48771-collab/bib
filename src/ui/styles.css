@@ -71,71 +71,6 @@ header.masthead p {
   font-size: 0.9rem;
 }
 
-/* ── 段階の進行表示 ────────────────────────────────── */
-
-.stages {
-  display: grid;
-  gap: 0.75rem;
-  margin-bottom: 1.5rem;
-}
-
-.stage {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 0.9rem 1rem;
-  display: flex;
-  gap: 0.85rem;
-  align-items: flex-start;
-  flex-wrap: wrap;
-}
-
-.stage-num {
-  flex: none;
-  width: 1.7rem;
-  height: 1.7rem;
-  border-radius: 50%;
-  display: grid;
-  place-items: center;
-  font-size: 0.8rem;
-  font-weight: 700;
-  background: var(--accent-soft);
-  color: var(--accent);
-}
-
-.stage[data-status="done"] .stage-num {
-  background: var(--ok-soft);
-  color: var(--ok);
-}
-
-.stage[data-status="error"] .stage-num {
-  background: var(--danger-soft);
-  color: var(--danger);
-}
-
-.stage-body {
-  flex: 1 1 16rem;
-  min-width: 0;
-}
-
-.stage-body h2 {
-  margin: 0 0 0.15rem;
-  font-size: 0.98rem;
-}
-
-.stage-body p {
-  margin: 0;
-  font-size: 0.84rem;
-  color: var(--muted);
-}
-
-.stage-actions {
-  flex: none;
-  display: flex;
-  gap: 0.5rem;
-  align-items: center;
-}
-
 /* ── 部品 ────────────────────────────────────────── */
 
 button {
@@ -168,8 +103,6 @@ button:disabled {
   cursor: not-allowed;
 }
 
-input[type="text"],
-input[type="password"],
 select {
   font: inherit;
   font-size: 0.88rem;
@@ -188,29 +121,28 @@ label {
   margin-bottom: 0.25rem;
 }
 
-.field {
-  margin-bottom: 0.9rem;
-}
-
 .hint {
   font-size: 0.78rem;
   color: var(--muted);
   margin-top: 0.3rem;
 }
 
-.progress {
-  height: 5px;
-  background: var(--border);
-  border-radius: 3px;
-  overflow: hidden;
-  margin-top: 0.5rem;
+/* 読み取りを始める前の案内。押すボタンはここの1つだけ */
+.lead {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1rem;
+  margin-bottom: 1.5rem;
 }
 
-.progress > span {
-  display: block;
-  height: 100%;
-  background: var(--accent);
-  transition: width 0.2s;
+.lead p {
+  margin: 0 0 0.75rem;
+  font-size: 0.88rem;
+}
+
+.lead .hint {
+  margin: 0.5rem 0 0;
 }
 
 .notice {
@@ -413,24 +345,6 @@ textarea.preview {
   overflow-x: auto;
 }
 
-details.settings {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 0.75rem 1rem;
-  margin-bottom: 1.5rem;
-}
-
-details.settings summary {
-  cursor: pointer;
-  font-weight: 600;
-  font-size: 0.92rem;
-}
-
-details.settings > div {
-  margin-top: 0.9rem;
-}
-
 .visually-hidden {
   position: absolute;
   width: 1px;
@@ -444,7 +358,7 @@ details.settings > div {
 
 .modes {
   display: grid;
-  /* 3方式が狭い画面でも潰れないよう、入る分だけ横に並べる */
+  /* 狭い画面でも潰れないよう、入る分だけ横に並べる */
   grid-template-columns: repeat(auto-fit, minmax(9.5rem, 1fr));
   gap: 0.5rem;
   margin: 1.25rem 0;
@@ -570,9 +484,52 @@ details.settings > div {
   font-variant-numeric: tabular-nums;
 }
 
-.scanner-recent {
-  display: block;
-  margin-top: 0.2rem;
+.scanner-pending {
+  margin-left: 0.6rem;
+  font-size: 0.78rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 読んだ端から書名が入っていく欄。かざしたまま結果を確かめられる */
+.scan-feed {
+  list-style: none;
+  margin: 0.6rem 0 0;
+  padding: 0;
+  border-top: 1px solid var(--border);
+}
+
+.scan-feed li {
+  display: flex;
+  gap: 0.6rem;
+  align-items: baseline;
+  padding: 0.35rem 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.82rem;
+}
+
+.scan-feed-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scan-feed li[data-state='looking'] .scan-feed-title {
+  color: var(--muted);
+}
+
+.scan-feed li[data-state='found'] .scan-feed-title {
+  color: var(--ok);
+}
+
+.scan-feed li[data-state='missing'] .scan-feed-title {
+  color: var(--danger);
+}
+
+.scan-feed-isbn {
+  flex: none;
   font-size: 0.72rem;
   color: var(--muted);
   font-variant-numeric: tabular-nums;
@@ -585,75 +542,6 @@ details.settings > div {
   flex-wrap: wrap;
 }
 
-
-/* ── チャットAI経由の取り込み ─────────────────────────── */
-
-.chat-import {
-  margin: 1rem 0 1.5rem;
-  padding: 0.85rem 0.95rem;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--surface);
-}
-
-.chat-steps {
-  margin: 0;
-  padding-left: 1.3rem;
-}
-
-.chat-steps > li {
-  margin-bottom: 1.1rem;
-}
-
-.chat-steps > li:last-child {
-  margin-bottom: 0;
-}
-
-.chat-steps p {
-  margin: 0 0 0.5rem;
-  font-size: 0.85rem;
-  line-height: 1.55;
-}
-
-.chat-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.4rem;
-}
-
-.chat-toast {
-  margin: 0.5rem 0 0;
-  padding: 0.4rem 0.6rem;
-  border-radius: 6px;
-  background: var(--accent-soft);
-  font-size: 0.78rem;
-  line-height: 1.5;
-}
-
-.chat-prompt {
-  margin-top: 0.6rem;
-}
-
-.chat-prompt summary {
-  font-size: 0.78rem;
-  color: var(--muted);
-  cursor: pointer;
-}
-
-.chat-import textarea {
-  width: 100%;
-  box-sizing: border-box;
-  margin-top: 0.4rem;
-  padding: 0.5rem 0.6rem;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--bg);
-  color: var(--text);
-  font-family: inherit;
-  font-size: 0.8rem;
-  line-height: 1.5;
-  resize: vertical;
-}
 
 /* ── 書影 ─────────────────────────────────────────────── */
 

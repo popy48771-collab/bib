@@ -5,8 +5,7 @@
  * 写真は Blob のまま、書誌データは構造化オブジェクトとして保存する。
  */
 
-import type { BookEntry, Photo, Project, Settings } from '../types'
-import { DEFAULT_SETTINGS } from '../types'
+import type { BookEntry, Photo, Project } from '../types'
 
 const DB_NAME = 'bookshelf-scanner'
 const DB_VERSION = 1
@@ -14,8 +13,6 @@ const DB_VERSION = 1
 const STORE_PHOTOS = 'photos'
 const STORE_ENTRIES = 'entries'
 const STORE_PROJECTS = 'projects'
-
-const SETTINGS_KEY = 'bookshelf-scanner:settings'
 
 function openDb(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -123,33 +120,15 @@ export function listProjects(): Promise<Project[]> {
   return withStore(STORE_PROJECTS, 'readonly', (s) => promisify(s.getAll()))
 }
 
-// ── 設定 ──────────────────────────────────────────────
-
 /**
- * 設定は localStorage に置く。APIキーを含むため、
- * 保存されるのは利用者の端末内のみである旨を UI で明示すること。
+ * 以前の版は APIキーと中継URLを localStorage に置いていた。
+ * 設定項目が無くなった今は不要なので、残っていれば掃除する。
+ * APIキーを利用者の端末に置きっぱなしにしない意味もある。
  */
-export function loadSettings(): Settings {
+export function forgetLegacySettings(): void {
   try {
-    const raw = localStorage.getItem(SETTINGS_KEY)
-    if (!raw) return { ...DEFAULT_SETTINGS }
-    const parsed = JSON.parse(raw) as Partial<Settings>
-    const merged = { ...DEFAULT_SETTINGS, ...parsed }
-    // 既定のプロキシを導入する前に保存された設定は空文字を持っている。
-    // そのまま採ると NDL 段階が無効のままになるので、空なら既定に戻す。
-    // (NDL 段階はボタン起動なので、既定が入っていても勝手には走らない)
-    if (!merged.ndlProxyUrl.trim()) merged.ndlProxyUrl = DEFAULT_SETTINGS.ndlProxyUrl
-    return merged
+    localStorage.removeItem('bookshelf-scanner:settings')
   } catch {
-    return { ...DEFAULT_SETTINGS }
+    /* localStorage が使えない環境では何もしなくてよい */
   }
-}
-
-export function saveSettings(settings: Settings): void {
-  localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings))
-}
-
-export function clearApiKey(): void {
-  const s = loadSettings()
-  saveSettings({ ...s, vlmApiKey: '' })
 }

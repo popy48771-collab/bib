@@ -1,40 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { BookEntry, ScoredCandidate, Settings, StageId, StageStatus } from './types'
-import {
-  adoptCandidate,
-  entriesFromExtraction,
-  runGoogleBooksStage,
-  runNdlStage,
-  runOpenBdStage,
-  type StageContext,
-} from './pipeline/stages'
-import { entriesFromIsbns } from './pipeline/stages'
-import { extractSpines, isVlmConfigured } from './sources/vlm'
-import { isNdlConfigured } from './sources/ndl'
-import { loadSettings, saveSettings, listEntries, saveEntries, clearEntries } from './lib/db'
-import { SettingsPanel } from './ui/SettingsPanel'
+import type { BookEntry, ScoredCandidate } from './types'
+import { adoptCandidate, entriesFromIsbns, resolveEntries, resolveEntry } from './pipeline/stages'
+import { clearEntries, forgetLegacySettings, listEntries, saveEntries } from './lib/db'
 import { BookList } from './ui/BookList'
 import { ExportPanel } from './ui/ExportPanel'
-import { BarcodeScanner } from './ui/BarcodeScanner'
-import { ChatImportPanel } from './ui/ChatImportPanel'
-import type { ExtractedSpine } from './sources/vlm'
+import { BarcodeScanner, type ScanResult } from './ui/BarcodeScanner'
 
 /** 読み取り方式。いずれも同じ書誌パイプラインへ合流する */
-type InputMode = 'barcode' | 'spine' | 'chat'
-
-interface StageState {
-  status: StageStatus
-  message?: string
-  done?: number
-  total?: number
-}
-
-const INITIAL_STAGES: Record<StageId, StageState> = {
-  extract: { status: 'idle' },
-  googleBooks: { status: 'idle' },
-  ndl: { status: 'idle' },
-  openbd: { status: 'idle' },
-}
+type InputMode = 'barcode' | 'spine'
 
 /** 衝突しないID。crypto.randomUUID が無い環境向けの退避も持つ */
 function newId(): string {
@@ -42,428 +15,232 @@ function newId(): string {
   return `id-${Date.now()}-${Math.floor(Math.random() * 1e9)}`
 }
 
+/** まだ書誌が引けていない項目。再照合の対象になる */
+function isUnresolved(entry: BookEntry): boolean {
+  return entry.status === 'notFound' || entry.status === 'unverified'
+}
+
 export function App() {
-  const [settings, setSettings] = useState<Settings>(() => loadSettings())
   const [entries, setEntries] = useState<BookEntry[]>([])
-  const [stages, setStages] = useState<Record<StageId, StageState>>(INITIAL_STAGES)
   const [error, setError] = useState<string | null>(null)
   // 既定はバーコード。APIキーが要らず課金も発生しないので、初見でも必ず動く
   const [inputMode, setInputMode] = useState<InputMode>('barcode')
   const [scanning, setScanning] = useState(false)
-  const abortRef = useRef<AbortController | null>(null)
+  /** 照合待ちの件数。走査は止めずに裏で進むので、進み具合だけ見せる */
+  const [pending, setPending] = useState(0)
+  const [retrying, setRetrying] = useState(false)
 
-  // 起動時に前回の続きを復元する。段階を分けた以上、中断からの再開は必須
+  /**
+   * entries の最新値。
+   *
+   * 照合は1冊ずつ非同期に返ってくるので、state のクロージャを見ると
+   * 古い配列を掴んで先に返った結果を消してしまう。書き込みは必ずここを通す。
+   */
+  const entriesRef = useRef<BookEntry[]>([])
+  /** 照合の直列キュー。同時に何本も投げると Google Books に絞られる */
+  const queueRef = useRef<Promise<unknown>>(Promise.resolve())
+
+  // 起動時に前回の続きを復元する
   useEffect(() => {
+    forgetLegacySettings()
     listEntries()
       .then((loaded) => {
-        if (loaded.length > 0) setEntries(loaded)
+        if (loaded.length === 0) return
+        entriesRef.current = loaded
+        setEntries(loaded)
       })
       .catch(() => setError('保存済みデータの読み込みに失敗しました。'))
   }, [])
 
-  const updateSettings = useCallback((next: Settings) => {
-    setSettings(next)
-    saveSettings(next)
-  }, [])
-
-  /** 変更を state と IndexedDB の両方に反映する */
-  const commit = useCallback((next: BookEntry[]) => {
+  /** 1件を差し替える(無ければ追加)。走査中は次々に来るので保存も1件に絞る */
+  const upsertEntry = useCallback((entry: BookEntry) => {
+    const prev = entriesRef.current
+    const next = prev.some((e) => e.id === entry.id)
+      ? prev.map((e) => (e.id === entry.id ? entry : e))
+      : [...prev, entry]
+    entriesRef.current = next
     setEntries(next)
-    saveEntries(next).catch(() => setError('保存に失敗しました。'))
+    saveEntries([entry]).catch(() => setError('保存に失敗しました。'))
   }, [])
 
-  const setStage = useCallback((id: StageId, patch: Partial<StageState>) => {
-    setStages((prev) => ({ ...prev, [id]: { ...prev[id], ...patch } }))
-  }, [])
-
-  const makeContext = useCallback(
-    (id: StageId, controller: AbortController): StageContext => ({
-      signal: controller.signal,
-      onProgress: (done, total) => setStage(id, { done, total }),
-      settings: {
-        ndlProxyUrl: settings.ndlProxyUrl,
-        googleBooksCountry: settings.googleBooksCountry,
-      },
-    }),
-    [settings.ndlProxyUrl, settings.googleBooksCountry, setStage],
-  )
-
   /**
-   * 段階を1つ実行する共通処理。
-   * 各段階は独立して起動でき、失敗しても他の段階の成果は壊さない。
+   * バーコードを1冊読んだときの処理。
+   *
+   * まず ISBN だけの行を出し、書誌照合は裏で走らせる。
+   * 「読めた」ことが即座に見えないと、同じ本を何度もかざすことになる。
    */
-  const runStage = useCallback(
-    async (id: StageId, fn: (ctx: StageContext) => Promise<BookEntry[]>) => {
-      setError(null)
-      const controller = new AbortController()
-      abortRef.current = controller
-      setStage(id, { status: 'running', done: 0, total: entries.length, message: undefined })
+  const onIsbn = useCallback(
+    (isbn: string) => {
+      const entry = entriesFromIsbns([isbn], `scan-${newId()}`)[0]
+      upsertEntry(entry)
+      setPending((n) => n + 1)
 
-      try {
-        const next = await fn(makeContext(id, controller))
-        commit(next)
-        setStage(id, { status: 'done' })
-      } catch (err) {
-        if (err instanceof DOMException && err.name === 'AbortError') {
-          setStage(id, { status: 'idle', message: '中断しました' })
-          return
-        }
-        const message = err instanceof Error ? err.message : '不明なエラー'
-        setStage(id, { status: 'error', message })
-        setError(message)
-      } finally {
-        abortRef.current = null
-      }
+      queueRef.current = queueRef.current
+        .then(async () => {
+          // 照合を待つ間に消去・除外されているかもしれないので取り直す
+          const current = entriesRef.current.find((e) => e.id === entry.id)
+          if (!current) return
+          const resolved = await resolveEntry(current)
+          if (entriesRef.current.some((e) => e.id === entry.id)) upsertEntry(resolved)
+        })
+        .catch(() => setError('書誌の照合に失敗しました。通信環境をご確認ください。'))
+        .finally(() => setPending((n) => n - 1))
     },
-    [entries.length, makeContext, commit, setStage],
+    [upsertEntry],
   )
 
-  // ── 段階0: 写真の取り込みと読み取り ──────────────────
-  const onPickPhotos = useCallback(
-    async (files: FileList | null) => {
-      if (!files || files.length === 0) return
-      setError(null)
+  /** ISBN ごとの照合状況。スキャナの表示用 */
+  const scanResults = useMemo(() => {
+    const map = new Map<string, ScanResult>()
+    for (const e of entries) {
+      const isbn = e.resolved?.isbn13
+      if (!isbn) continue
+      const title = e.resolved?.title || undefined
+      map.set(isbn, {
+        state: title ? 'found' : e.status === 'notFound' ? 'missing' : 'looking',
+        title,
+      })
+    }
+    return map
+  }, [entries])
 
-      const controller = new AbortController()
-      abortRef.current = controller
-      setStage('extract', { status: 'running', done: 0, total: files.length })
+  const knownIsbns = useMemo(() => new Set(scanResults.keys()), [scanResults])
+  const unresolved = useMemo(() => entries.filter(isUnresolved), [entries])
 
-      const collected: BookEntry[] = []
-      try {
-        for (let i = 0; i < files.length; i++) {
-          const photoId = newId()
-          const spines = await extractSpines(files[i], settings, controller.signal)
-          collected.push(...entriesFromExtraction(photoId, spines, photoId))
-          setStage('extract', { done: i + 1, total: files.length })
-        }
-        // 複数枚の撮影を重ねられるよう、既存の結果に足す
-        commit([...entries, ...collected])
-        setStage('extract', { status: 'done' })
-        // 抽出をやり直したら以降の段階は古くなる
-        setStages((p) => ({
-          ...p,
-          googleBooks: { status: 'idle' },
-          ndl: { status: 'idle' },
-          openbd: { status: 'idle' },
-        }))
-      } catch (err) {
-        if (err instanceof DOMException && err.name === 'AbortError') {
-          setStage('extract', { status: 'idle', message: '中断しました' })
-          return
-        }
-        const message = err instanceof Error ? err.message : '不明なエラー'
-        setStage('extract', { status: 'error', message })
-        setError(message)
-      } finally {
-        abortRef.current = null
-      }
-    },
-    [entries, settings, commit, setStage],
-  )
-
-  // ── バーコードからの取り込み ──────────────────────────
-  /** 既に一覧にある ISBN。スキャナ側の重複検知に渡す */
-  const knownIsbns = useMemo(
-    () => new Set(entries.map((e) => e.resolved?.isbn13).filter((v): v is string => !!v)),
-    [entries],
-  )
-
-  const onScanned = useCallback(
-    (isbns: string[]) => {
-      setScanning(false)
-      if (isbns.length === 0) return
-      setError(null)
-      commit([...entries, ...entriesFromIsbns(isbns, newId())])
-      // ISBN は手に入ったが書誌はまだ空。照合段階を促すため done にはしない
-      setStage('extract', { status: 'done' })
-      setStages((p) => ({
-        ...p,
-        googleBooks: { status: 'idle' },
-        ndl: { status: 'idle' },
-        openbd: { status: 'idle' },
-      }))
-    },
-    [entries, commit, setStage],
-  )
-
-  /**
-   * チャットAIの結果を取り込む。
-   * 書名は背表紙経路と同じく未確認として入れ、ISBN はバーコード経路と同じ扱いにする。
-   * どちらも次段の書誌照合で実在確認される。
-   */
-  const onChatImport = useCallback(
-    (spines: ExtractedSpine[], isbns: string[]) => {
-      setError(null)
-      const batchId = newId()
-      const added = [
-        ...entriesFromExtraction(batchId, spines, batchId),
-        ...entriesFromIsbns(isbns, `${batchId}-isbn`),
-      ]
-      if (added.length === 0) return
-      commit([...entries, ...added])
-      setStage('extract', { status: 'done' })
-      setStages((p) => ({
-        ...p,
-        googleBooks: { status: 'idle' },
-        ndl: { status: 'idle' },
-        openbd: { status: 'idle' },
-      }))
-    },
-    [entries, commit, setStage],
-  )
+  /** 引けなかったものを引き直す。通信が一時的に落ちていた場合の受け皿 */
+  const onRetry = useCallback(async () => {
+    setError(null)
+    setRetrying(true)
+    try {
+      await resolveEntries(entriesRef.current.filter(isUnresolved), { onEntry: upsertEntry })
+    } catch {
+      setError('再照合に失敗しました。通信環境をご確認ください。')
+    } finally {
+      setRetrying(false)
+    }
+  }, [upsertEntry])
 
   // ── 手動操作 ────────────────────────────────────────
+  const patchEntry = useCallback(
+    (entryId: string, fn: (entry: BookEntry) => BookEntry) => {
+      const found = entriesRef.current.find((e) => e.id === entryId)
+      if (found) upsertEntry(fn(found))
+    },
+    [upsertEntry],
+  )
+
   const onAdopt = useCallback(
     (entryId: string, candidate: ScoredCandidate) => {
-      commit(
-        entries.map((e) =>
-          e.id === entryId
-            ? // 手動で選んだものは pinned にして、以降の自動処理で上書きさせない
-              { ...adoptCandidate(e, candidate), status: 'confirmed', pinned: true, conflicts: undefined }
-            : e,
-        ),
-      )
+      // 手動で選んだものは pinned にして、以降の自動処理で上書きさせない
+      patchEntry(entryId, (e) => ({
+        ...adoptCandidate(e, candidate),
+        status: 'confirmed',
+        pinned: true,
+        conflicts: undefined,
+      }))
     },
-    [entries, commit],
+    [patchEntry],
   )
 
   const onExclude = useCallback(
-    (entryId: string) => {
-      commit(entries.map((e) => (e.id === entryId ? { ...e, status: 'excluded' } : e)))
-    },
-    [entries, commit],
+    (entryId: string) => patchEntry(entryId, (e) => ({ ...e, status: 'excluded' })),
+    [patchEntry],
   )
 
   const onRestore = useCallback(
-    (entryId: string) => {
-      commit(
-        entries.map((e) =>
-          e.id === entryId ? { ...e, status: e.resolved ? 'needsReview' : 'unverified' } : e,
-        ),
-      )
-    },
-    [entries, commit],
+    (entryId: string) =>
+      patchEntry(entryId, (e) => ({ ...e, status: e.resolved?.title ? 'needsReview' : 'unverified' })),
+    [patchEntry],
   )
 
   const onReset = useCallback(() => {
     clearEntries().catch(() => undefined)
+    entriesRef.current = []
     setEntries([])
-    setStages(INITIAL_STAGES)
     setError(null)
   }, [])
-
-  const busy = Object.values(stages).some((s) => s.status === 'running')
-  const ndlReady = isNdlConfigured(settings.ndlProxyUrl)
-  const vlmReady = isVlmConfigured(settings)
-  const hasIsbn = useMemo(() => entries.some((e) => e.resolved?.isbn13), [entries])
-
-  const stageDefs: {
-    id: StageId
-    n: number
-    title: string
-    desc: string
-    action: React.ReactNode
-  }[] = [
-    {
-      id: 'extract',
-      n: 1,
-      title:
-        inputMode === 'barcode'
-          ? 'バーコードを読み取る'
-          : inputMode === 'chat'
-            ? 'チャットAIに読み取らせる'
-            : '写真から背表紙を読み取る',
-      desc:
-        inputMode === 'barcode'
-          ? 'カメラをバーコードにかざすだけで次々に読み取ります。APIキー不要・通信なし・課金なしで、誤読もほぼありません。'
-          : inputMode === 'chat'
-            ? 'お使いのチャットAIに写真を渡して読み取らせ、結果をここに貼り付けます。既に契約しているサブスクをそのまま使えるので、API課金は発生しません。'
-            : vlmReady
-              ? '本棚の写真を選ぶと、背表紙のタイトル・著者を読み取ります。1段ずつ画面いっぱいに撮ると精度が上がります。'
-              : 'この方式にはAPIキーが必要です。設定を開いて登録するか、他の方式に切り替えてください。',
-      action:
-        inputMode === 'chat' ? null : inputMode === 'barcode' ? (
-          <button className="primary" disabled={busy} onClick={() => setScanning(true)}>
-            カメラを起動
-          </button>
-        ) : (
-          <label className="primary" style={{ margin: 0 }}>
-            <span
-              style={{
-                display: 'inline-block',
-                padding: '0.45rem 0.9rem',
-                borderRadius: 7,
-                background: vlmReady && !busy ? 'var(--accent)' : 'var(--border)',
-                color: vlmReady && !busy ? '#fff' : 'var(--muted)',
-                cursor: vlmReady && !busy ? 'pointer' : 'not-allowed',
-                fontSize: '0.88rem',
-                fontWeight: 400,
-              }}
-            >
-              写真を選ぶ
-            </span>
-            <input
-              type="file"
-              accept="image/*"
-              multiple
-              className="visually-hidden"
-              disabled={!vlmReady || busy}
-              onChange={(e) => {
-                void onPickPhotos(e.target.files)
-                e.target.value = ''
-              }}
-            />
-          </label>
-        ),
-    },
-    {
-      id: 'googleBooks',
-      n: 2,
-      title: "書誌データベースで照合する",
-      desc: "読み取った内容を書誌データベースで照合し、実在が確認できたものを確定します。ISBN が判っているものは日本の書籍に強い openBD を先に当てます。",
-      action: (
-        <button
-          className="primary"
-          disabled={busy || entries.length === 0}
-          onClick={() => void runStage('googleBooks', (ctx) => runGoogleBooksStage(entries, ctx))}
-        >
-          照合する
-        </button>
-      ),
-    },
-    {
-      id: 'ndl',
-      n: 3,
-      title: 'NDLサーチと突合する（任意）',
-      desc: ndlReady
-        ? '国立国会図書館サーチの結果と比較します。一次結果は上書きせず、差分の表示と欠けた項目の補完だけを行います。'
-        : 'NDLサーチは CORS 非対応のため、設定でプロキシURLを登録すると使えるようになります。未設定でも他の機能は動きます。',
-      action: (
-        <button
-          disabled={busy || !ndlReady || entries.length === 0}
-          onClick={() => void runStage('ndl', (ctx) => runNdlStage(entries, ctx))}
-        >
-          突合する
-        </button>
-      ),
-    },
-    {
-      id: 'openbd',
-      n: 4,
-      title: 'openBD で情報を補う（任意）',
-      desc: 'ISBN が確定した本に、出版社・発売日・書影・内容紹介を補完します。',
-      action: (
-        <button
-          disabled={busy || !hasIsbn}
-          onClick={() => void runStage('openbd', (ctx) => runOpenBdStage(entries, ctx))}
-        >
-          補完する
-        </button>
-      ),
-    },
-  ]
 
   return (
     <div className="app">
       <header className="masthead">
         <h1>本棚スキャナ</h1>
-        <p>本棚の写真から背表紙を読み取り、書誌情報を検索して蔵書一覧を作ります。</p>
+        <p>バーコードにカメラをかざすだけで、書誌情報を調べて蔵書一覧を作ります。</p>
       </header>
-
-      <SettingsPanel settings={settings} onChange={updateSettings} />
 
       {error && <div className="notice error">{error}</div>}
 
       {/*
         読み取り方式の切り替え。
-        バーコードは課金ゼロ・高精度だが1冊ずつ手に取る必要があり、
-        背表紙は棚を撮るだけで済むがAPIキーと従量課金が要る。
+        バーコードは1冊ずつ手に取る必要があるが課金ゼロで確実に読める。
+        背表紙は棚にかざすだけで済むが、読み取りが曖昧で照合の当たり外れがある。
         どちらが良いかは状況で変わるので、利用者に選ばせる。
       */}
       <div className="modes" role="group" aria-label="読み取り方式">
         <button
           className="mode"
           aria-pressed={inputMode === 'barcode'}
-          disabled={busy}
           onClick={() => setInputMode('barcode')}
         >
           <span className="mode-title">バーコード</span>
-          <span className="mode-note">課金なし・高精度／1冊ずつ</span>
-        </button>
-        <button
-          className="mode"
-          aria-pressed={inputMode === 'chat'}
-          disabled={busy}
-          onClick={() => setInputMode('chat')}
-        >
-          <span className="mode-title">チャットAI</span>
-          <span className="mode-note">課金なし・棚ごと／貼り付け手動</span>
+          <span className="mode-note">かざすだけ・高精度／1冊ずつ</span>
         </button>
         <button
           className="mode"
           aria-pressed={inputMode === 'spine'}
-          disabled={busy}
           onClick={() => setInputMode('spine')}
         >
-          <span className="mode-title">背表紙の写真</span>
-          <span className="mode-note">
-            {vlmReady ? '全自動／APIキーと課金が必要' : 'APIキー未設定'}
-          </span>
+          <span className="mode-title">本棚の背表紙</span>
+          <span className="mode-note">棚ごと／準備中</span>
         </button>
       </div>
 
-      {scanning && (
-        <BarcodeScanner
-          knownIsbns={knownIsbns}
-          onDone={onScanned}
-          onCancel={() => setScanning(false)}
-        />
+      {inputMode === 'barcode' ? (
+        scanning ? (
+          <BarcodeScanner
+            knownIsbns={knownIsbns}
+            results={scanResults}
+            onIsbn={onIsbn}
+            onClose={() => setScanning(false)}
+          />
+        ) : (
+          <section className="lead">
+            <p>
+              カメラを起動して、本の裏表紙のバーコードにかざしてください。
+              読み取った端から書誌情報を調べて、下の一覧に並べます。ボタン操作は要りません。
+            </p>
+            <button className="primary" onClick={() => setScanning(true)}>
+              カメラを起動
+            </button>
+            <p className="hint">カメラは HTTPS でのみ利用できます。</p>
+          </section>
+        )
+      ) : (
+        <section className="lead">
+          <p>
+            本棚にカメラをかざして背表紙から読み取る方式は準備中です。
+            いまはバーコードをお使いください。
+          </p>
+        </section>
       )}
 
-      {inputMode === 'chat' && <ChatImportPanel onImport={onChatImport} disabled={busy} />}
+      {pending > 0 && <div className="notice info">書誌を照合しています… 残り {pending} 冊</div>}
 
-      <div className="stages">
-        {stageDefs.map((s) => {
-          const st = stages[s.id]
-          const pct = st.total ? Math.round(((st.done ?? 0) / st.total) * 100) : 0
-          return (
-            <section className="stage" key={s.id} data-status={st.status}>
-              <span className="stage-num">{st.status === 'done' ? '✓' : s.n}</span>
-              <div className="stage-body">
-                <h2>{s.title}</h2>
-                <p>{st.message ?? s.desc}</p>
-                {st.status === 'running' && (
-                  <div className="progress">
-                    <span style={{ width: `${pct}%` }} />
-                  </div>
-                )}
-              </div>
-              <div className="stage-actions">{s.action}</div>
-            </section>
-          )
-        })}
-      </div>
+      <h2 style={{ fontSize: '1.05rem', marginTop: '2rem' }}>書誌一覧</h2>
 
-      {busy && (
-        <div className="notice info">
-          実行中…{' '}
-          <button onClick={() => abortRef.current?.abort()} style={{ marginLeft: '0.5rem' }}>
-            中止
+      {unresolved.length > 0 && pending === 0 && (
+        <p className="hint">
+          {unresolved.length} 冊は書誌が引けませんでした。
+          <button onClick={() => void onRetry()} disabled={retrying} style={{ marginLeft: '0.5rem' }}>
+            {retrying ? '再照合中…' : '再照合する'}
           </button>
-        </div>
+        </p>
       )}
 
-      <h2 style={{ fontSize: '1.05rem', marginTop: '2rem' }}>読み取った本</h2>
-      <BookList
-        entries={entries}
-        onAdopt={onAdopt}
-        onExclude={onExclude}
-        onRestore={onRestore}
-      />
+      <BookList entries={entries} onAdopt={onAdopt} onExclude={onExclude} onRestore={onRestore} />
 
       {entries.length > 0 && (
         <>
-          <h2 style={{ fontSize: '1.05rem', marginTop: '2rem' }}>書誌一覧を出力</h2>
+          <h2 style={{ fontSize: '1.05rem', marginTop: '2rem' }}>書き出す</h2>
           <ExportPanel entries={entries} />
 
           <p style={{ marginTop: '2rem' }}>

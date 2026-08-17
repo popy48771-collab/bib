@@ -156,7 +156,7 @@ function BookRow({ entry, onAdopt, onExclude, onRestore }: { entry: BookEntry } 
 
 export function BookList({ entries, onAdopt, onExclude, onRestore }: Props) {
   if (entries.length === 0) {
-    return <p className="hint">まだ本がありません。写真を取り込んで読み取りを実行してください。</p>
+    return <p className="hint">まだ本がありません。カメラを起動してバーコードをかざしてください。</p>
   }
 
   const counts = entries.reduce<Record<string, number>>((acc, e) => {

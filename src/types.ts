@@ -12,11 +12,22 @@
 /** 書誌情報の出典 */
 export type SourceId = 'vlm' | 'ocr' | 'manual' | 'googleBooks' | 'ndl' | 'openbd' | 'barcode'
 
-/** 段階(ステージ)の識別子。パイプラインはこの順に進む */
-export type StageId = 'extract' | 'googleBooks' | 'ndl' | 'openbd'
-
-/** 各段階の実行状態。段階ごとに独立して持つので、片方が失敗しても他は残る */
-export type StageStatus = 'idle' | 'running' | 'done' | 'error' | 'skipped'
+/**
+ * 背表紙から読み取った1冊分。書誌DBで実在確認する前の「照合クエリ」。
+ *
+ * バーコード経路は ISBN で完全一致が引けるが、背表紙経路は読み取り結果が
+ * 曖昧なまま出てくる。両者はここで型を分けたまま、同じ照合処理に合流する
+ * (pipeline/stages.ts の entriesFromExtraction / entriesFromIsbns)。
+ */
+export interface ExtractedSpine {
+  title: string
+  authors: string[]
+  publisher?: string
+  /** 読み取り側の自己申告信頼度 (0..1) */
+  confidence: number
+  /** 写真・映像上の位置 (0..1 相対座標)。判らないこともある */
+  box?: BoundingBox
+}
 
 /** 1件の書誌候補 */
 export interface BibRecord {
@@ -77,7 +88,7 @@ export interface BookEntry {
   id: string
   /** どの写真から来たか */
   photoId: string
-  /** 写真上の位置。VLM が返さない場合は undefined */
+  /** 写真・映像上の位置。読み取り側が返さない場合は undefined */
   box?: BoundingBox
   /** 背表紙から読み取った生テキスト */
   rawText: string
@@ -127,42 +138,22 @@ export interface Project {
   name: string
   createdAt: number
   updatedAt: number
-  /** 段階ごとの実行状態 */
-  stages: Record<StageId, { status: StageStatus; ranAt?: number; message?: string }>
-}
-
-/** 設定。localStorage に保存する */
-export interface Settings {
-  /** BYOK: 利用者自身のAPIキー */
-  vlmProvider: 'anthropic' | 'gemini' | 'none'
-  vlmApiKey: string
-  vlmModel: string
-  /**
-   * NDLサーチは CORS 非対応のため、ブラウザから直接呼べない。
-   * 中継プロキシの URL を設定したときのみ NDL 突合の段階が有効になる。
-   * 既定では同梱の中継(proxy/ndl-worker.js)を指しており、設定不要で使える。
-   */
-  ndlProxyUrl: string
-  /** Google Books の言語・地域の絞り込み */
-  googleBooksCountry: string
 }
 
 /**
  * 同梱の NDL 中継プロキシ。
  *
+ * NDLサーチは CORS 非対応でブラウザから直接呼べないため中継を挟む。
  * 秘密情報を含まないので公開して差し支えない。中継先は NDL に、
  * 呼び出し元はこのアプリの生成元に限定してある(proxy/ndl-worker.js)。
- * 自分で用意した中継に差し替えたい場合は設定画面から上書きできる。
+ *
+ * 差し替え用の設定画面は持たない。設定項目がひとつでもあると
+ * 「まず設定してから使うもの」に見え、かざすだけという性質が濁る。
  */
-export const DEFAULT_NDL_PROXY_URL = 'https://still-hall-1b04.popy48771.workers.dev/?url='
+export const NDL_PROXY_URL = 'https://still-hall-1b04.popy48771.workers.dev/?url='
 
-export const DEFAULT_SETTINGS: Settings = {
-  vlmProvider: 'none',
-  vlmApiKey: '',
-  vlmModel: '',
-  ndlProxyUrl: DEFAULT_NDL_PROXY_URL,
-  googleBooksCountry: 'JP',
-}
+/** Google Books の言語・地域の絞り込み。日本語書籍を主に扱うため JP 固定 */
+export const GOOGLE_BOOKS_COUNTRY = 'JP'
 
 /** 自動確定に必要な最低スコア。これ未満は人間の確認に回す */
 export const AUTO_CONFIRM_THRESHOLD = 0.82
