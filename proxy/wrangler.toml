@@ -1,0 +1,14 @@
+### NDLサーチ用 CORS プロキシ
+#
+# 手元に Node がある場合はこの設定で直接デプロイできる:
+#   cd proxy && npx wrangler deploy
+#
+# スマホから設置する場合はこの設定を使わず、
+# ダッシュボードに ndl-worker.js を貼り付ける方が早い(README 参照)。
+
+name = "ndl-cors-proxy"
+main = "ndl-worker.js"
+compatibility_date = "2025-11-01"
+
+# 保存領域も秘密情報も使わないため、バインディングは無い。
+# 追加設定なしでそのままデプロイできる。

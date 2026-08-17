@@ -9,12 +9,24 @@ Google Books や openBD で当たらない本もここでは引けます。
 
 ## スマホから設置する手順（Cloudflare Workers・無料枠）
 
-1. <https://dash.cloudflare.com/> にアクセスしてログイン（アカウントが無ければ作成）
-2. 左メニューの **Workers & Pages** → **Create** → **Start with Hello World!** → **Deploy**
-3. デプロイ後の画面で **Edit code**（またはワーカー名 → **Edit code**）
-4. エディタの中身を全部消し、[`ndl-worker.js`](./ndl-worker.js) の中身を貼り付け
+先にコードをコピーしておくと楽です。次を開いて全選択・コピーしてください。
+
+<https://raw.githubusercontent.com/popy48771-collab/bib/main/proxy/ndl-worker.js>
+
+1. <https://dash.cloudflare.com/> にログイン（アカウントが無ければ作成。無料）
+2. **Workers & Pages** → **Create** → **Start with Hello World!** → **Deploy**
+3. デプロイ後の画面で **Edit code**
+4. エディタの中身を**全部消して**、コピーしたコードを貼り付け
 5. **Deploy** を押す
 6. 画面に出る `https://<名前>.<サブドメイン>.workers.dev` を控える
+
+所要はおよそ3分です。クレジットカードの登録は要りません。
+
+### 手元に Node がある場合
+
+```sh
+cd proxy && npx wrangler deploy
+```
 
 ## アプリ側の設定
 
