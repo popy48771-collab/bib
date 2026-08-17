@@ -121,6 +121,14 @@ export interface StageContext {
   signal?: AbortSignal
   /** 1件処理するたびに呼ばれる。UI の進捗表示用 */
   onProgress?: (done: number, total: number) => void
+  /**
+   * 1件の取得に失敗したときに呼ばれる。
+   *
+   * 段階は「隔離」の性質を保つため個別の失敗では中断しないが、
+   * 黙って飛ばすと通信が切れていても成功と区別できない。
+   * 件数を数えて利用者に伝えるのは呼び出し側の仕事。
+   */
+  onEntryError?: (err: unknown) => void
   settings: { ndlProxyUrl: string; googleBooksCountry: string }
 }
 
@@ -177,6 +185,7 @@ export async function runGoogleBooksStage(
     } catch (err) {
       if (err instanceof DOMException && err.name === 'AbortError') throw err
       // openBD が落ちていても Google Books 経路は生かす
+      ctx.onEntryError?.(err)
     }
   }
 
@@ -233,6 +242,7 @@ export async function runGoogleBooksStage(
     } catch (err) {
       if (err instanceof DOMException && err.name === 'AbortError') throw err
       // 1件の失敗で全体を止めない。未確認のまま残す
+      ctx.onEntryError?.(err)
       out.push({ ...entry, status: entry.resolved ? entry.status : 'unverified' })
     }
 
@@ -370,6 +380,7 @@ export async function runNdlStage(entries: BookEntry[], ctx: StageContext): Prom
       if (err instanceof DOMException && err.name === 'AbortError') throw err
       if (err instanceof ndl.NdlNotConfiguredError) throw err
       // 通信失敗は一次結果を壊さずに素通り
+      ctx.onEntryError?.(err)
       out.push(entry)
     }
 

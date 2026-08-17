@@ -51,12 +51,14 @@ export function ChatImportPanel({ onImport, disabled }: Props) {
   const [result, setResult] = useState<string | null>(null)
 
   const notifyCopied = useCallback((label: string, ok: boolean) => {
-    setCopied(ok ? label : 'コピーできませんでした。下の本文を選択してコピーしてください。')
-    setTimeout(() => setCopied(null), 2600)
+    setCopied(
+      ok ? label : 'コピーできませんでした。下の入力欄の内容を選択してコピーしてください。',
+    )
+    setTimeout(() => setCopied(null), 6000)
   }, [])
 
   const onCopy = useCallback(async () => {
-    notifyCopied('プロンプトをコピーしました', await copyText(CHAT_EXTRACTION_PROMPT))
+    notifyCopied('指示文をコピーしました。', await copyText(CHAT_EXTRACTION_PROMPT))
   }, [notifyCopied])
 
   const onOpen = useCallback(
@@ -67,8 +69,8 @@ export function ChatImportPanel({ onImport, disabled }: Props) {
       const ok = await copyText(CHAT_EXTRACTION_PROMPT)
       notifyCopied(
         target.prefills
-          ? `${target.label} を開きます（プロンプトはコピー済み）`
-          : `${target.label} を開きます。プロンプトを貼り付けてください（コピー済み）`,
+          ? `${target.label} を新しいタブで開きました。指示文はコピー済みです。`
+          : `${target.label} を新しいタブで開きました。コピー済みの指示文を貼り付けてください。`,
         ok,
       )
       window.open(target.url(CHAT_EXTRACTION_PROMPT), '_blank', 'noopener,noreferrer')
@@ -79,7 +81,9 @@ export function ChatImportPanel({ onImport, disabled }: Props) {
   const onSubmit = useCallback(() => {
     const { spines, isbns } = parseImportedBooks(pasted)
     if (spines.length === 0 && isbns.length === 0) {
-      setResult('読み取れる本がありませんでした。JSON でも、1行1冊の箇条書きでも取り込めます。')
+      setResult(
+        '本の情報を読み取れませんでした。JSON、1行1冊の箇条書き、ISBNの並びのいずれかの形式で貼り付けてください。',
+      )
       return
     }
     onImport(spines, isbns)
@@ -88,53 +92,93 @@ export function ChatImportPanel({ onImport, disabled }: Props) {
       spines.length > 0 ? `書名 ${spines.length} 件` : '',
       isbns.length > 0 ? `ISBN ${isbns.length} 件` : '',
     ].filter(Boolean)
-    setResult(`${parts.join(' / ')} を取り込みました。`)
+    setResult(`${parts.join('、')} を取り込みました。`)
   }, [pasted, onImport])
 
   return (
-    <div className="chat-import">
-      <ol className="chat-steps">
+    <div className="panel">
+      <ol className="steps">
         <li>
-          <p>
-            プロンプトをコピーして、お使いのチャットAIを開きます。
-            <strong>写真は URL に載せられない</strong>ので、添付だけはご自身で行ってください。
+          <h2 className="subheading">指示文をコピーして、チャットAIを開く</h2>
+          <p className="note">
+            写真はURLで渡せないため、チャットAIへの写真の添付はご自身で行ってください。
           </p>
-          <div className="chat-actions">
-            <button className="primary" onClick={() => void onCopy()} disabled={disabled}>
-              プロンプトをコピー
+          <div className="actions">
+            <button
+              type="button"
+              className="button button--primary"
+              onClick={() => void onCopy()}
+              disabled={disabled}
+            >
+              指示文をコピー
             </button>
             {CHAT_TARGETS.map((t) => (
-              <button key={t.id} onClick={() => void onOpen(t.id)} disabled={disabled}>
+              <button
+                type="button"
+                key={t.id}
+                className="button button--secondary"
+                onClick={() => void onOpen(t.id)}
+                disabled={disabled}
+              >
                 {t.label} を開く
               </button>
             ))}
           </div>
-          {copied && <p className="chat-toast">{copied}</p>}
-          <details className="chat-prompt">
-            <summary>プロンプトの内容を見る</summary>
-            <textarea readOnly rows={8} value={CHAT_EXTRACTION_PROMPT} onFocus={(e) => e.currentTarget.select()} />
+          {copied && (
+            <p className="note" role="status">
+              {copied}
+            </p>
+          )}
+          <details className="disclosure">
+            <summary>指示文の内容を確認する</summary>
+            <div className="field">
+              <label htmlFor="chat-prompt">チャットAIへ渡す指示文</label>
+              <textarea
+                id="chat-prompt"
+                readOnly
+                rows={8}
+                value={CHAT_EXTRACTION_PROMPT}
+                onFocus={(e) => e.currentTarget.select()}
+              />
+            </div>
           </details>
         </li>
 
         <li>
-          <p>チャット側で本棚の写真を添付して実行し、返ってきた結果をコピーします。</p>
+          <h2 className="subheading">チャットAIで写真を読み取らせる</h2>
+          <p className="note">本棚の写真を添付して実行し、返ってきた結果をコピーしてください。</p>
         </li>
 
         <li>
-          <p>ここに貼り付けます。</p>
-          <textarea
-            rows={6}
-            value={pasted}
-            disabled={disabled}
-            placeholder={'ここに結果を貼り付け\n\nJSON でも、1行1冊の箇条書きでも、ISBN の羅列でも取り込めます'}
-            onChange={(e) => setPasted(e.target.value)}
-          />
-          <div className="chat-actions">
-            <button className="primary" onClick={onSubmit} disabled={disabled || !pasted.trim()}>
-              取り込む
+          <h2 className="subheading">結果を貼り付ける</h2>
+          <div className="field">
+            <label htmlFor="chat-result">チャットAIの結果</label>
+            <p className="field-hint">
+              JSON、1行1冊の箇条書き、ISBNの並びのいずれの形式でも取り込めます。
+            </p>
+            <textarea
+              id="chat-result"
+              rows={6}
+              value={pasted}
+              disabled={disabled}
+              onChange={(e) => setPasted(e.target.value)}
+            />
+          </div>
+          <div className="actions">
+            <button
+              type="button"
+              className="button button--primary"
+              onClick={onSubmit}
+              disabled={disabled || !pasted.trim()}
+            >
+              一覧に追加
             </button>
           </div>
-          {result && <p className="chat-toast">{result}</p>}
+          {result && (
+            <p className="note" role="status">
+              {result}
+            </p>
+          )}
         </li>
       </ol>
     </div>

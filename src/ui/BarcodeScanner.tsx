@@ -7,17 +7,30 @@ import {
   pickIsbn13,
   type BarcodeReader,
 } from '../lib/barcode'
+import { Notice } from './Notice'
 
 interface Props {
+  /** カメラを動かすか。false のときは停止した状態の画面を出す */
+  active: boolean
   /** 既に一覧に入っている ISBN。重複スキャンを検知するために渡す */
   knownIsbns: ReadonlySet<string>
-  /** 読み取りを終えたとき。新規の ISBN だけが渡る */
+  /** 一覧に登録済みの冊数。読み取り画面の末尾に出す */
+  registeredCount: number
+  onStart: () => void
+  onStop: () => void
+  /** 読み取ったものを一覧に追加する */
   onDone: (isbns: string[]) => void
-  onCancel: () => void
+  /** 蔵書一覧へ移動する */
+  onOpenLibrary: () => void
+  /** 他の処理が動いている間は開始させない */
+  disabled?: boolean
 }
 
 /** 検出を試みる間隔。毎フレーム回すと wasm 経路で発熱するだけで精度は上がらない */
 const SCAN_INTERVAL_MS = 140
+
+/** 読み取り結果を状態表示に残す時間。過ぎたら「探索中」に戻す */
+const RESULT_HOLD_MS = 2500
 
 /** 読み取り成功の合図を出す。端末が対応していないものは黙って飛ばす */
 function signalHit(): void {
@@ -28,13 +41,33 @@ function signalHit(): void {
   }
 }
 
+/** 状態表示の内容。色ではなく文章で状態を伝える */
+interface StatusView {
+  kind: 'idle' | 'searching' | 'success' | 'duplicate'
+  label: string
+  detail?: string
+}
+
 /**
  * ISBN バーコードの連続スキャン。
  *
  * 本を「かざすだけ」で次々に読めることを狙っている。
  * シャッターを押させると1冊ごとに手が止まり、棚卸しの速度が出ない。
+ *
+ * 画面の並びは DESIGN_SYSTEM.md で定めた順序に従う:
+ * カメラ表示領域 → 現在の状態 → 主操作ボタン → 登録済み件数と一覧へのリンク。
+ * （見出しと説明文は呼び出し側が出す）
  */
-export function BarcodeScanner({ knownIsbns, onDone, onCancel }: Props) {
+export function BarcodeScanner({
+  active,
+  knownIsbns,
+  registeredCount,
+  onStart,
+  onStop,
+  onDone,
+  onOpenLibrary,
+  disabled,
+}: Props) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
   /** このセッションで読んだ ISBN。描画のたびに作り直さないよう ref で持つ */
@@ -45,7 +78,9 @@ export function BarcodeScanner({ knownIsbns, onDone, onCancel }: Props) {
   const [ready, setReady] = useState(false)
   const [readerKind, setReaderKind] = useState<BarcodeReader['kind'] | null>(null)
   /** 直近の読み取り結果。既出かどうかで表示を変える */
-  const [flash, setFlash] = useState<{ isbn: string; dup: boolean; at: number } | null>(null)
+  const [lastRead, setLastRead] = useState<{ isbn: string; dup: boolean } | null>(null)
+  /** 再読み取りのたびに増やして、カメラ起動の副作用をやり直させる */
+  const [attempt, setAttempt] = useState(0)
 
   const handleCode = useCallback(
     (isbn: string) => {
@@ -55,12 +90,14 @@ export function BarcodeScanner({ knownIsbns, onDone, onCancel }: Props) {
         setScanned((prev) => [...prev, isbn])
       }
       signalHit()
-      setFlash({ isbn, dup, at: Date.now() })
+      setLastRead({ isbn, dup })
     },
     [knownIsbns],
   )
 
   useEffect(() => {
+    if (!active) return
+
     let cancelled = false
     let stream: MediaStream | null = null
     let timer: ReturnType<typeof setTimeout> | undefined
@@ -77,7 +114,7 @@ export function BarcodeScanner({ knownIsbns, onDone, onCancel }: Props) {
         setError(
           err instanceof CameraUnavailableError
             ? err.message
-            : 'バーコード読み取りを開始できませんでした。',
+            : 'バーコードの読み取りを開始できませんでした。ページを再読み込みして、もう一度お試しください。',
         )
         return
       }
@@ -128,67 +165,141 @@ export function BarcodeScanner({ knownIsbns, onDone, onCancel }: Props) {
       cancelled = true
       clearTimeout(timer)
       stream?.getTracks().forEach((t) => t.stop())
+      setReady(false)
     }
-  }, [handleCode])
+  }, [active, attempt, handleCode])
 
-  // 読み取り表示を一定時間で消す
+  // 読み取り結果の表示を一定時間で「探索中」に戻す
   useEffect(() => {
-    if (!flash) return
-    const t = setTimeout(() => setFlash(null), 1200)
+    if (!lastRead) return
+    const t = setTimeout(() => setLastRead(null), RESULT_HOLD_MS)
     return () => clearTimeout(t)
-  }, [flash])
+  }, [lastRead])
 
-  if (error) {
-    return (
-      <div className="scanner">
-        <div className="notice error">{error}</div>
-        <div className="scanner-actions">
-          <button onClick={onCancel}>戻る</button>
-        </div>
-      </div>
-    )
-  }
+  const retry = useCallback(() => {
+    setError(null)
+    setAttempt((n) => n + 1)
+    if (!active) onStart()
+  }, [active, onStart])
+
+  const stop = useCallback(() => {
+    setLastRead(null)
+    onStop()
+  }, [onStop])
+
+  const status: StatusView = !active
+    ? {
+        kind: 'idle',
+        label: 'カメラは停止しています',
+        detail: '「カメラを開始」を押すと読み取りを始めます。',
+      }
+    : !ready
+      ? { kind: 'idle', label: 'カメラを起動しています', detail: 'カメラの利用を許可してください。' }
+      : lastRead
+        ? lastRead.dup
+          ? { kind: 'duplicate', label: 'このISBNは登録済みです', detail: lastRead.isbn }
+          : { kind: 'success', label: 'ISBNを読み取りました', detail: lastRead.isbn }
+        : {
+            kind: 'searching',
+            label: 'バーコードを探しています',
+            detail: 'バーコードを枠の中に収めてください。',
+          }
 
   return (
-    <div className="scanner">
+    <div className="stack">
+      {/* 3. カメラ表示領域 */}
       <div className="scanner-view">
         <video ref={videoRef} playsInline muted autoPlay />
-        <div className="scanner-band" data-hit={flash ? (flash.dup ? 'dup' : 'new') : undefined} />
-        {!ready && <p className="scanner-status">カメラを準備しています…</p>}
-        {flash && (
-          <p className="scanner-toast" data-dup={flash.dup}>
-            {flash.dup ? `読み取り済み: ${flash.isbn}` : `${flash.isbn}`}
+        {active && !error && <div className="scanner-guide" aria-hidden="true" />}
+        {(!active || !ready) && (
+          <p className="scanner-placeholder">
+            {error
+              ? 'カメラを利用できません'
+              : active
+                ? 'カメラを起動しています'
+                : 'カメラは停止しています'}
           </p>
         )}
       </div>
 
+      {/* 切り出し用。画面には出さないが、常に DOM に置いておく必要がある */}
       <canvas ref={canvasRef} className="visually-hidden" />
 
-      <p className="hint">
-        本の裏表紙のバーコードを枠に重ねてください。上段（978で始まる方）を読みます。
-        {readerKind === 'wasm' && ' ／ このブラウザでは互換モードで読み取っています。'}
-      </p>
+      {/* 4. 現在の状態 */}
+      {error ? (
+        <Notice kind="error" live="alert">
+          {error}
+        </Notice>
+      ) : (
+        <p className="scanner-status" data-kind={status.kind} role="status">
+          <span className="scanner-status__label">{status.label}</span>
+          {status.detail && <span className="scanner-status__detail">{status.detail}</span>}
+        </p>
+      )}
 
-      <div className="scanner-count">
-        <strong>{scanned.length}</strong> 冊読み取り
-        {scanned.length > 0 && (
-          <span className="scanner-recent">
-            {scanned.slice(-3).reverse().join(' / ')}
-            {scanned.length > 3 && ' …'}
-          </span>
-        )}
-      </div>
+      {/* 5. 主操作ボタン */}
+      {error ? (
+        <div className="actions">
+          <button type="button" className="button button--primary" onClick={retry}>
+            再読み取り
+          </button>
+          <button type="button" className="button button--secondary" onClick={stop}>
+            読み取りをやめる
+          </button>
+        </div>
+      ) : active ? (
+        <div className="actions">
+          <button
+            type="button"
+            className="button button--primary"
+            disabled={scanned.length === 0}
+            onClick={() => onDone(scanned)}
+          >
+            一覧に追加（{scanned.length}件）
+          </button>
+          <button type="button" className="button button--secondary" onClick={stop}>
+            カメラを停止
+          </button>
+        </div>
+      ) : (
+        <div className="actions">
+          <button
+            type="button"
+            className="button button--primary button--block"
+            disabled={disabled}
+            onClick={onStart}
+          >
+            カメラを開始
+          </button>
+        </div>
+      )}
 
-      <div className="scanner-actions">
-        <button
-          className="primary"
-          disabled={scanned.length === 0}
-          onClick={() => onDone(scanned)}
-        >
-          読み取りを終える（{scanned.length}冊）
+      {active && scanned.length > 0 && (
+        <ul className="scanner-log">
+          <li>このあと一覧に追加するISBN（新しいものから）</li>
+          {scanned
+            .slice(-3)
+            .reverse()
+            .map((isbn) => (
+              <li key={isbn}>{isbn}</li>
+            ))}
+          {scanned.length > 3 && <li>ほか {scanned.length - 3} 件</li>}
+        </ul>
+      )}
+
+      {readerKind === 'wasm' && (
+        <p className="note">
+          このブラウザは互換モードで読み取っています。読み取りに少し時間がかかります。
+        </p>
+      )}
+
+      {/* 6. 登録済み件数と一覧へのリンク */}
+      <p className="note">
+        登録済み: {registeredCount} 件{' '}
+        <button type="button" className="button button--compact" onClick={onOpenLibrary}>
+          蔵書一覧を開く
         </button>
-        <button onClick={onCancel}>やめる</button>
-      </div>
+      </p>
     </div>
   )
 }

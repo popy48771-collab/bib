@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest'
-import { isIsbnBarcode, pickIsbn13 } from './barcode'
+import { afterEach, describe, expect, it } from 'vitest'
+import { CameraUnavailableError, isIsbnBarcode, openRearCamera, pickIsbn13 } from './barcode'
 
 /**
  * 日本の書籍バーコードは2段組で、下段(192...)は分類・価格コードであって
@@ -65,5 +65,69 @@ describe('pickIsbn13', () => {
 
   it('無効なコードを読み飛ばして有効なものを拾う', () => {
     expect(pickIsbn13(['xxxx', '', '9784873115659', '9784101010014'])).toBe('9784101010014')
+  })
+})
+
+/**
+ * カメラを開けなかったときの文面。
+ *
+ * 実機での権限拒否はヘッドレスブラウザでは再現できない
+ * (NotAllowedError ではなく NotSupportedError になる)ため、
+ * 分岐ごとの文面はここで固定する。
+ *
+ * 文面の規則は DESIGN_SYSTEM.md のとおり「何が起きたか。次に何をすればよいか。」。
+ * どの分岐も、原因と次の行動の両方を含んでいなければならない。
+ */
+describe('openRearCamera が返すエラー文', () => {
+  const define = (key: string, value: unknown, target: object = globalThis) => {
+    Object.defineProperty(target, key, { value, configurable: true, writable: true })
+  }
+
+  const rejectWith = (err: unknown) => {
+    define('isSecureContext', true)
+    define('mediaDevices', { getUserMedia: () => Promise.reject(err) }, navigator)
+  }
+
+  afterEach(() => {
+    define('mediaDevices', undefined, navigator)
+    define('isSecureContext', true)
+  })
+
+  it('権限拒否では、許可されていないことと設定の確認を伝える', async () => {
+    rejectWith(new DOMException('Permission denied', 'NotAllowedError'))
+    await expect(openRearCamera()).rejects.toThrow(CameraUnavailableError)
+    await expect(openRearCamera()).rejects.toThrow(
+      'カメラへのアクセスが許可されていません。ブラウザの設定を確認して、カメラの使用を許可してください。',
+    )
+  })
+
+  it('カメラが無い場合は、次に取るべき行動まで書く', async () => {
+    rejectWith(new DOMException('Not found', 'NotFoundError'))
+    await expect(openRearCamera()).rejects.toThrow(
+      'カメラが見つかりませんでした。カメラのある端末で開いてください。',
+    )
+  })
+
+  it('想定外の失敗でも、原因の候補と次の行動を示す', async () => {
+    // ヘッドレス環境で実際に返るのはこの分岐(NotSupportedError)
+    rejectWith(new DOMException('Not supported', 'NotSupportedError'))
+    const err = await openRearCamera().catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(CameraUnavailableError)
+    expect((err as Error).message).toMatch(/確認して/)
+    expect((err as Error).message).toMatch(/もう一度/)
+  })
+
+  it('カメラ入力に対応しないブラウザでは、別のブラウザを案内する', async () => {
+    define('isSecureContext', true)
+    define('mediaDevices', undefined, navigator)
+    await expect(openRearCamera()).rejects.toThrow(
+      'このブラウザはカメラの利用に対応していません。別のブラウザで開いてください。',
+    )
+  })
+
+  it('素の http では HTTPS が必要であることを伝える', async () => {
+    define('isSecureContext', false)
+    await expect(openRearCamera()).rejects.toThrow(/HTTPS/)
+    await expect(openRearCamera()).rejects.toThrow(/開いてください/)
   })
 })

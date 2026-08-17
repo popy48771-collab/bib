@@ -135,7 +135,9 @@ export async function openRearCamera(): Promise<MediaStream> {
     )
   }
   if (!navigator.mediaDevices?.getUserMedia) {
-    throw new CameraUnavailableError('このブラウザはカメラ入力に対応していません。')
+    throw new CameraUnavailableError(
+      'このブラウザはカメラの利用に対応していません。別のブラウザで開いてください。',
+    )
   }
 
   try {
@@ -149,15 +151,20 @@ export async function openRearCamera(): Promise<MediaStream> {
     })
   } catch (err) {
     const name = err instanceof DOMException ? err.name : ''
+    // 文面は「何が起きたか。次に何をすればよいか。」の順に揃える
     if (name === 'NotAllowedError') {
       throw new CameraUnavailableError(
-        'カメラの使用が許可されませんでした。ブラウザの設定で許可してください。',
+        'カメラへのアクセスが許可されていません。ブラウザの設定を確認して、カメラの使用を許可してください。',
       )
     }
     if (name === 'NotFoundError') {
-      throw new CameraUnavailableError('カメラが見つかりませんでした。')
+      throw new CameraUnavailableError(
+        'カメラが見つかりませんでした。カメラのある端末で開いてください。',
+      )
     }
-    throw new CameraUnavailableError('カメラを開けませんでした。')
+    throw new CameraUnavailableError(
+      'カメラを開けませんでした。他のアプリがカメラを使っていないか確認して、もう一度お試しください。',
+    )
   }
 }
 

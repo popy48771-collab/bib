@@ -3,11 +3,16 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-    <meta name="description" content="本棚の写真から背表紙を読み取り、書誌情報を検索して蔵書一覧を作るツール" />
-    <!-- 外部ファイルを増やさず 404 も出さないよう、アイコンは埋め込む -->
+    <meta name="description" content="本のバーコードを読み取り、書誌情報を取得して蔵書一覧を作るツール" />
+    <!-- ブラウザのUI色。デザイントークンのプライマリーと同じ値にする -->
+    <meta name="theme-color" content="#0017c1" />
+    <!--
+      外部ファイルを増やさず 404 も出さないよう、アイコンは埋め込む。
+      色はデザイントークンのプライマリーのみ。装飾は付けない。
+    -->
     <link
       rel="icon"
-      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23374151'/%3E%3Crect x='7' y='8' width='4.5' height='16' rx='1' fill='%23f4f1ea'/%3E%3Crect x='13' y='8' width='4.5' height='16' rx='1' fill='%23a3b8cc'/%3E%3Crect x='19' y='11' width='4.5' height='13' rx='1' fill='%23d9a05b'/%3E%3C/svg%3E"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%230017c1'/%3E%3Crect x='7' y='8' width='4' height='16' fill='%23ffffff'/%3E%3Crect x='14' y='8' width='4' height='16' fill='%23ffffff'/%3E%3Crect x='21' y='11' width='4' height='13' fill='%23ffffff'/%3E%3C/svg%3E"
     />
     <title>本棚スキャナ</title>
   </head>
