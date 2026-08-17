@@ -654,3 +654,26 @@ details.settings > div {
   line-height: 1.5;
   resize: vertical;
 }
+
+/* ── 書影 ─────────────────────────────────────────────── */
+
+.book-head {
+  display: flex;
+  gap: 0.7rem;
+  align-items: flex-start;
+}
+
+.book-headings {
+  flex: 1;
+  min-width: 0;
+}
+
+.book-cover {
+  flex: 0 0 auto;
+  width: 46px;
+  /* 判型は本によって違うので高さは成り行きに任せ、上限だけ設ける */
+  max-height: 70px;
+  object-fit: contain;
+  border-radius: 3px;
+  background: var(--border);
+}

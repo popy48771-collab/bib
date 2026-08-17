@@ -23,6 +23,19 @@ import { tidy } from '../lib/normalize'
 
 const NDL_OPENSEARCH_PATH = 'https://ndlsearch.ndl.go.jp/api/opensearch'
 
+/**
+ * NDL の書影URL。
+ *
+ * ここだけはプロキシが要らない。CORS が制限するのは fetch/XHR であって、
+ * `<img src>` による画像の読み込みは同一生成元ポリシーの対象外だからである。
+ * したがって書誌データは取れなくても、書影は今すぐ静的サイトから表示できる。
+ *
+ * 書影が無い ISBN では 404 を返すので、呼び出し側で onError による退避が要る。
+ */
+export function thumbnailUrl(isbn13: string): string {
+  return `https://ndlsearch.ndl.go.jp/thumbnail/${encodeURIComponent(isbn13)}.jpg`
+}
+
 export class NdlNotConfiguredError extends Error {
   constructor() {
     super(

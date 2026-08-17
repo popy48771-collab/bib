@@ -1,5 +1,36 @@
+import { useMemo, useState } from 'react'
 import type { BookEntry, ScoredCandidate, SourceId } from '../types'
 import { formatIsbn13 } from '../lib/isbn'
+import { thumbnailUrl } from '../sources/ndl'
+
+/**
+ * 書影。取得元を順に試して、全部駄目なら何も出さない。
+ *
+ * NDL の書影はプロキシ無しで表示できる(CORS は fetch にはかかるが
+ * `<img>` にはかからない)ため、書誌データが NDL から取れない状態でも
+ * ISBN さえ判っていれば絵は出せる。
+ */
+function BookCover({ isbn13, coverUrl }: { isbn13?: string; coverUrl?: string }) {
+  const sources = useMemo(
+    () => [coverUrl, isbn13 ? thumbnailUrl(isbn13) : undefined].filter((v): v is string => !!v),
+    [coverUrl, isbn13],
+  )
+  const [index, setIndex] = useState(0)
+
+  // 書影が無い ISBN では 404 が返る。その場合は次の候補へ、無ければ非表示
+  if (index >= sources.length) return null
+
+  return (
+    <img
+      className="book-cover"
+      src={sources[index]}
+      alt=""
+      loading="lazy"
+      decoding="async"
+      onError={() => setIndex((i) => i + 1)}
+    />
+  )
+}
 
 const STATUS_LABEL: Record<BookEntry['status'], string> = {
   confirmed: '確定',
@@ -53,6 +84,9 @@ function BookRow({ entry, onAdopt, onExclude, onRestore }: { entry: BookEntry } 
 
   return (
     <li className="book" data-status={entry.status}>
+      <div className="book-head">
+        <BookCover isbn13={r?.isbn13} coverUrl={r?.coverUrl} />
+        <div className="book-headings">
       <h3>
         {(r?.title ?? entry.extracted.title) || '(タイトル不明)'}{' '}
         <span className="source-tag">{STATUS_LABEL[entry.status]}</span>
@@ -68,6 +102,8 @@ function BookRow({ entry, onAdopt, onExclude, onRestore }: { entry: BookEntry } 
           .filter(Boolean)
           .join(' / ') || '書誌情報なし'}
       </p>
+        </div>
+      </div>
 
       {!r && entry.rawText && <p className="raw">読み取り: {entry.rawText}</p>}
 
