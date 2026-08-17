@@ -63,7 +63,7 @@ export function SettingsPanel({ settings, onChange }: Props) {
         )}
 
         <div className="field">
-          <label htmlFor="ndlproxy">NDLサーチ用プロキシURL（任意）</label>
+          <label htmlFor="ndlproxy">NDLサーチ用プロキシURL</label>
           <input
             id="ndlproxy"
             type="text"
@@ -72,10 +72,12 @@ export function SettingsPanel({ settings, onChange }: Props) {
             placeholder="https://your-proxy.example/?url="
           />
           <p className="hint">
-            国立国会図書館サーチは CORS に対応していないため、ブラウザから直接呼び出せません。
-            突合機能を使うには、ご自身で用意した CORS プロキシの URL を登録してください。
-            未設定でも他の機能はすべて動作します。
-            末尾が <code>=</code> の場合は対象URLをエンコードして連結し、それ以外はパスとして連結します。
+            国立国会図書館サーチは CORS に対応しておらず、ブラウザから直接呼び出せません。
+            そのため中継を挟みます。<strong>既定の中継が入っているので、通常は変更不要です。</strong>
+            日本の書籍は法定納本により NDL の網羅性が最も高く、
+            Google Books や openBD で当たらない本もここで引けます。
+            自分で用意した中継に差し替えることもできます（空にすると既定に戻ります）。
+            末尾が <code>=</code> なら対象URLをエンコードして連結し、それ以外はパスとして連結します。
           </p>
         </div>
 

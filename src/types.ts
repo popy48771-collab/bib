@@ -139,19 +139,28 @@ export interface Settings {
   vlmModel: string
   /**
    * NDLサーチは CORS 非対応のため、ブラウザから直接呼べない。
-   * 利用者が自分で用意した CORS プロキシの URL をここに設定したときのみ
-   * NDL 突合の段階が有効になる。未設定なら機能は無効表示のまま。
+   * 中継プロキシの URL を設定したときのみ NDL 突合の段階が有効になる。
+   * 既定では同梱の中継(proxy/ndl-worker.js)を指しており、設定不要で使える。
    */
   ndlProxyUrl: string
   /** Google Books の言語・地域の絞り込み */
   googleBooksCountry: string
 }
 
+/**
+ * 同梱の NDL 中継プロキシ。
+ *
+ * 秘密情報を含まないので公開して差し支えない。中継先は NDL に、
+ * 呼び出し元はこのアプリの生成元に限定してある(proxy/ndl-worker.js)。
+ * 自分で用意した中継に差し替えたい場合は設定画面から上書きできる。
+ */
+export const DEFAULT_NDL_PROXY_URL = 'https://still-hall-1b04.popy48771.workers.dev/?url='
+
 export const DEFAULT_SETTINGS: Settings = {
   vlmProvider: 'none',
   vlmApiKey: '',
   vlmModel: '',
-  ndlProxyUrl: '',
+  ndlProxyUrl: DEFAULT_NDL_PROXY_URL,
   googleBooksCountry: 'JP',
 }
 

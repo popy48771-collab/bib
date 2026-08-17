@@ -134,7 +134,12 @@ export function loadSettings(): Settings {
     const raw = localStorage.getItem(SETTINGS_KEY)
     if (!raw) return { ...DEFAULT_SETTINGS }
     const parsed = JSON.parse(raw) as Partial<Settings>
-    return { ...DEFAULT_SETTINGS, ...parsed }
+    const merged = { ...DEFAULT_SETTINGS, ...parsed }
+    // 既定のプロキシを導入する前に保存された設定は空文字を持っている。
+    // そのまま採ると NDL 段階が無効のままになるので、空なら既定に戻す。
+    // (NDL 段階はボタン起動なので、既定が入っていても勝手には走らない)
+    if (!merged.ndlProxyUrl.trim()) merged.ndlProxyUrl = DEFAULT_SETTINGS.ndlProxyUrl
+    return merged
   } catch {
     return { ...DEFAULT_SETTINGS }
   }
