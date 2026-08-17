@@ -1,6 +1,13 @@
 /*
  * デザイントークンと共通部品
  *
+ * 値の出所はデジタル庁デザインシステムの公式実装。
+ *   - @digital-go-jp/design-tokens 2.0.1 の dist/tokens.css（プリミティブ）
+ *   - digital-go-jp/design-system-example-components-html の
+ *     src/global.css（意味づけ）と各コンポーネントCSS（寸法・状態）
+ * 各トークンの右に、対応する公式トークン名を書いてある。
+ * 値を変えるときは必ず公式側の名前を確認すること。
+ *
  * 規則の全文は /DESIGN_SYSTEM.md（要約）と /docs/DESIGN_RULES.md（原文）にある。
  * 要点だけ再掲する:
  *
@@ -13,18 +20,44 @@
 
 :root {
   /* ── 色 ─────────────────────────────────────────── */
-  --color-bg: #f7f7f7;
-  --color-surface: #ffffff;
-  --color-text: #1a1a1a;
-  --color-text-sub: #4d4d4d;
-  --color-text-weak: #666666;
-  --color-border: #949494;
-  --color-border-light: #d9d9d9;
-  --color-primary: #0017c1;
-  --color-primary-hover: #00118f;
-  --color-error: #b10e1e;
-  --color-success: #006e54;
-  --color-focus: #ffd43b;
+  --color-neutral-white: #ffffff;  /* neutral-white */
+  --color-neutral-black: #000000;  /* neutral-black */
+  --color-bg: #f2f2f2;             /* neutral-solid-gray-50 */
+  --color-surface: var(--color-neutral-white);
+  --color-text: #1a1a1a;           /* neutral-solid-gray-900 */
+  --color-text-body: #333333;      /* neutral-solid-gray-800（本文・通知の本体） */
+  --color-text-sub: #4d4d4d;       /* neutral-solid-gray-700 */
+  --color-text-weak: #666666;      /* neutral-solid-gray-600 */
+  /* 入力欄の枠。DADS は本文グレーと同じ solid-gray-600 を使う */
+  --color-border: #666666;         /* neutral-solid-gray-600 */
+  /*
+   * 区切り線。DADS が divider / table / list で使うのは gray-420 のみで、
+   * gray-100 や gray-200 を線に使う例は無い。薄くしすぎない。
+   */
+  --color-divider: #949494;        /* neutral-solid-gray-420 */
+  /* 不活性。DADS は塗りボタンを gray-300 の面に gray-50 の文字で表す */
+  --color-disabled-bg: #b3b3b3;    /* neutral-solid-gray-300 */
+  --color-disabled-text: #f2f2f2;  /* neutral-solid-gray-50 */
+  --color-disabled-fg: #b3b3b3;    /* neutral-solid-gray-300（線ボタンの文字） */
+  --color-disabled-field-bg: #f2f2f2; /* neutral-solid-gray-50（入力欄） */
+  --color-disabled-field-fg: #949494; /* neutral-solid-gray-420 */
+
+  --color-primary: #0017c1;        /* key-900 = primitive-blue-900 */
+  --color-primary-hover: #00118f;  /* key-1000 = primitive-blue-1000 */
+  --color-primary-active: #000060; /* key-1200 = primitive-blue-1200 */
+  --color-primary-soft: #c5d7fb;   /* key-200（線ボタンの hover 面） */
+  --color-primary-softer: #9db7f9; /* key-300（線ボタンの active 面） */
+  /* リンクは塗りボタンより一段濃い青。hover で明るくなる（DADS の指定） */
+  --color-link: #00118f;           /* primitive-blue-1000 */
+  --color-link-hover: #0017c1;     /* primitive-blue-900 */
+
+  --color-error: #ec0000;          /* semantic-error-1 = primitive-red-800 */
+  --color-error-strong: #a90000;   /* primitive-red-1000（hover） */
+  --color-error-soft: #ffbbbb;     /* primitive-red-200（線ボタンの hover 面） */
+  --color-success: #197a4b;        /* semantic-success-2 = primitive-green-800 */
+
+  --color-focus: #ffd43d;          /* primitive-yellow-300 */
+  --color-focus-outline: var(--color-neutral-black);
 
   /* ── 余白 ───────────────────────────────────────── */
   --space-1: 4px;
@@ -35,23 +68,32 @@
   --space-8: 32px;
 
   /* ── 形状 ───────────────────────────────────────── */
-  --radius: 4px;
-  --radius-lg: 6px;
+  /* DADS の button[md] / input / select / textarea はいずれも 8px */
+  --radius: 8px;                   /* border-radius-8 */
+  --radius-sm: 6px;                /* border-radius-6（button[sm]） */
+  --radius-xs: 4px;                /* border-radius-4（button[xs]・フォーカス輪） */
 
   /* ── 文字 ───────────────────────────────────────── */
+  /*
+   * DADS の font-family-sans は 'Noto Sans JP' を先頭に置くが、
+   * 外部Webフォントを必須にしない方針のため、端末にあるものを順に使う。
+   * Noto Sans JP は入っていれば拾われる。
+   */
   --font-family: system-ui, -apple-system, BlinkMacSystemFont, "Hiragino Sans",
     "Yu Gothic UI", "Yu Gothic", "Noto Sans JP", sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  --text-body: 16px;
-  --text-note: 14px;
-  --text-page-title: 24px;
-  --text-section: 20px;
-  --text-subheading: 17px;
-  --text-service-name: 18px;
+  --text-body: 16px;               /* font-size-16 */
+  --text-note: 14px;               /* font-size-14 */
+  --text-page-title: 24px;         /* font-size-24 */
+  --text-section: 20px;            /* font-size-20 */
+  --text-subheading: 17px;         /* font-size-17 */
+  --text-service-name: 18px;       /* font-size-18 */
+  /* 和文の可読性のために DADS が全体へ入れている字送り */
+  --tracking: 0.02em;
 
   /* ── 寸法 ───────────────────────────────────────── */
   --content-max: 720px;
-  /* 主操作ボタンの高さ。仕様の下限 48px */
+  /* DADS button[md] / input[md] の高さ */
   --control-height: 48px;
   /* 副次操作でも下回ってはいけないタップ領域 */
   --tap-min: 44px;
@@ -59,14 +101,9 @@
   /* ── 影 ─────────────────────────────────────────── */
   /*
    * 実際に前面へ浮くもの（モーダル等）専用。一覧行やパネルには使わない。
-   * フォーカス表示の輪は装飾ではなく可視化なので、別途 --focus-ring で持つ。
+   * DADS の elevation-1。
    */
-  --shadow-overlay: 0 2px 8px rgba(26, 26, 26, 0.24);
-  /*
-   * 黄色だけでは白背景に対して 3:1 を満たさないため、外周に濃色の輪を重ねる。
-   * outline(黄) の内外に濃色が出て、明るい面でも暗い面でも境界が見える。
-   */
-  --focus-ring: 0 0 0 5px var(--color-text);
+  --shadow-overlay: 0 2px 8px 1px rgba(0, 0, 0, 0.1), 0 1px 5px 0 rgba(0, 0, 0, 0.3);
 }
 
 /* 単一のパレットで運用する。配色を二重に持つと検証点が倍になる */
@@ -87,6 +124,7 @@ body {
   font-family: var(--font-family);
   font-size: var(--text-body);
   line-height: 1.6;
+  letter-spacing: var(--tracking);
   -webkit-text-size-adjust: 100%;
   /*
    * 横スクロールは overflow-x: hidden で隠さず、はみ出さない組み方で防ぐ。
@@ -98,10 +136,16 @@ body {
 
 /* ── フォーカス表示 ─────────────────────────────────── */
 
+/*
+ * DADS の :focus-visible をそのまま採る。
+ * 内側に黄(2px)、外側に黒(4px)。黄だけでは白背景に対して 3:1 を満たさないので、
+ * 黒の輪が明暗どちらの面でも境界を作る。
+ */
 :focus-visible {
-  outline: 3px solid var(--color-focus);
-  outline-offset: 1px;
-  box-shadow: var(--focus-ring);
+  outline: 4px solid var(--color-focus-outline);
+  outline-offset: 2px;
+  border-radius: var(--radius-xs);
+  box-shadow: 0 0 0 2px var(--color-focus);
 }
 
 /* マウス操作で輪が出続けるのは煩わしいので :focus-visible のみに出す */
@@ -144,7 +188,7 @@ body {
 .site-header {
   background: var(--color-surface);
   border-top: 4px solid var(--color-primary);
-  border-bottom: 1px solid var(--color-border-light);
+  border-bottom: 1px solid var(--color-divider);
 }
 
 .site-header .container {
@@ -168,7 +212,7 @@ body {
 
 .site-nav {
   background: var(--color-surface);
-  border-bottom: 1px solid var(--color-border-light);
+  border-bottom: 1px solid var(--color-divider);
 }
 
 .site-nav ul {
@@ -246,7 +290,7 @@ body {
  */
 .panel {
   background: var(--color-surface);
-  border: 1px solid var(--color-border-light);
+  border: 1px solid var(--color-divider);
   border-radius: var(--radius);
   padding: var(--space-4);
 }
@@ -281,7 +325,7 @@ body {
 
 .site-footer {
   background: var(--color-surface);
-  border-top: 1px solid var(--color-border-light);
+  border-top: 1px solid var(--color-divider);
   font-size: var(--text-note);
   line-height: 1.5;
   color: var(--color-text-sub);
@@ -318,13 +362,20 @@ body {
 
 /* ── リンク ────────────────────────────────────────── */
 
+/*
+ * DADS のリンク。既定は塗りボタンより濃い blue-1000 で、
+ * hover では色を明るくすると同時に下線を太くする（色だけに頼らない）。
+ */
 a {
-  color: var(--color-primary);
+  color: var(--color-link);
   text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
 }
 
 a:hover {
-  color: var(--color-primary-hover);
+  color: var(--color-link-hover);
+  text-decoration-thickness: 3px;
 }
 
 /* 一覧やフッターのリンクも指で押せる高さを確保する */
@@ -336,11 +387,18 @@ a:hover {
 
 /* ── ボタン ────────────────────────────────────────── */
 
+/*
+ * DADS の button[data-size="md"] が基準（最小幅96px・最小高48px・角丸8px・
+ * 内側余白 8/16・太字・line-height 1）。
+ * 種類は 塗り(solid-fill) / 線(outline) の2形で、色だけを差し替える。
+ * hover では色の変化に加えて下線を出す。色の違いが分からない人にも伝わるため。
+ */
 .button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: var(--space-2);
+  column-gap: var(--space-1);
+  min-width: 96px;
   min-height: var(--control-height);
   padding: var(--space-2) var(--space-4);
   border: 1px solid transparent;
@@ -348,74 +406,107 @@ a:hover {
   font-family: inherit;
   font-size: var(--text-body);
   font-weight: 700;
-  line-height: 1.5;
+  line-height: 1;
+  letter-spacing: var(--tracking);
   text-align: center;
   text-decoration: none;
+  text-underline-offset: 3px;
   cursor: pointer;
 }
 
+/*
+ * 塗り。透明の二重線は DADS の指定で、強制カラーモードで枠を残すためのもの。
+ */
 .button--primary {
+  border: 4px double transparent;
   background: var(--color-primary);
-  border-color: var(--color-primary);
-  color: #ffffff;
+  color: var(--color-neutral-white);
 }
 
 .button--primary:hover:not(:disabled) {
   background: var(--color-primary-hover);
-  border-color: var(--color-primary-hover);
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
 }
 
+.button--primary:active:not(:disabled) {
+  background: var(--color-primary-active);
+  text-decoration: underline;
+}
+
+/* 線。枠は currentcolor なので、文字色を変えれば枠も揃う */
 .button--secondary {
+  border: 1px solid currentcolor;
   background: var(--color-surface);
-  border-color: var(--color-primary);
   color: var(--color-primary);
 }
 
 .button--secondary:hover:not(:disabled) {
-  border-color: var(--color-primary-hover);
+  background: var(--color-primary-soft);
   color: var(--color-primary-hover);
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
 }
 
-/* 破壊的な操作。文字色だけでなく必ず「削除」の語を伴わせる */
+.button--secondary:active:not(:disabled) {
+  background: var(--color-primary-softer);
+  color: var(--color-primary-active);
+}
+
+/* 破壊的な操作。DADS のエラー用ボタン色。必ず「削除」の語を伴わせる */
 .button--danger {
+  border: 1px solid currentcolor;
   background: var(--color-surface);
-  border-color: var(--color-error);
   color: var(--color-error);
 }
 
 .button--danger:hover:not(:disabled) {
-  background: var(--color-error);
-  color: #ffffff;
+  background: var(--color-error-soft);
+  color: var(--color-error-strong);
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
 }
 
 /*
  * 任意実行の操作。青を使うのは主操作と現在地だけに絞りたいので、
- * 「押せるが本題ではない」ものはこの無彩色にする。
+ * 「押せるが本題ではない」ものは無彩色にする（DADS の info-2 と同じ考え方）。
  */
 .button--neutral {
+  border: 1px solid currentcolor;
   background: var(--color-surface);
-  border-color: var(--color-border);
-  color: var(--color-text);
+  color: var(--color-text-body);
   font-weight: 400;
 }
 
 .button--neutral:hover:not(:disabled) {
-  border-color: var(--color-text);
+  background: var(--color-bg);
+  color: var(--color-text);
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
 }
 
-/* 一覧行の副次操作。高さはタップ領域の下限まで下げてよい */
+/*
+ * 一覧行の副次操作。DADS の button[sm] 相当だが、高さは実寸で 44px を確保する。
+ * 公式は見た目 28〜36px に ::after で 44px の当たり判定を足す方式。
+ * どちらも要件は満たすが、実寸の方が検査で担保しやすいのでこちらを採る。
+ */
 .button--compact {
+  min-width: 0;
   min-height: var(--tap-min);
-  padding: var(--space-2) var(--space-3);
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid currentcolor;
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  color: var(--color-text-body);
   font-size: var(--text-note);
   font-weight: 400;
-  border-color: var(--color-border);
-  background: var(--color-surface);
-  color: var(--color-text);
 }
 
 .button--compact:hover:not(:disabled) {
-  border-color: var(--color-text);
+  background: var(--color-bg);
+  color: var(--color-text);
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
 }
 
 .button--block {
@@ -423,17 +514,25 @@ a:hover {
 }
 
 /*
- * 不活性の見せ方。
+ * 不活性。DADS は塗りを gray-300 の面に gray-50 の文字、
+ * 線を白地に gray-300 の文字で表す。
  * file input を包む <label> は disabled を持てないので aria-disabled も拾う。
- * opacity で薄めると文字が読めなくなるため、色を差し替える方式にしている。
  */
 .button:disabled,
 .button[aria-disabled='true'] {
-  background: var(--color-border-light);
-  border-color: var(--color-border-light);
-  /* #666 では薄灰の上で 4.5:1 に届かないので、一段濃い補助文字色を使う */
-  color: var(--color-text-sub);
+  background: var(--color-disabled-bg);
+  color: var(--color-disabled-text);
+  text-decoration: none;
   cursor: not-allowed;
+}
+
+.button--secondary:disabled,
+.button--secondary[aria-disabled='true'],
+.button--neutral:disabled,
+.button--danger:disabled,
+.button--compact:disabled {
+  background: var(--color-surface);
+  color: var(--color-disabled-fg);
 }
 
 .actions {
@@ -448,21 +547,27 @@ a:hover {
   margin-top: var(--space-6);
 }
 
+/* DADS の form-control-label[md]。ラベルは 17px 太字、下に 8px 空ける */
 .field > label,
 .field > .field-label {
   display: block;
   margin-bottom: var(--space-2);
-  font-size: var(--text-body);
+  font-size: var(--text-subheading);
   font-weight: 700;
 }
 
+/*
+ * DADS の input-text / select / textarea。
+ * 枠は solid-gray-600、角丸8px、内側余白 12/16、高さ[md] 48px。
+ * hover では枠を黒にして、押せる場所であることを示す。
+ */
 input[type="text"],
 input[type="password"],
 select,
 textarea {
   width: 100%;
   min-height: var(--control-height);
-  padding: var(--space-2) var(--space-3);
+  padding: var(--space-3) var(--space-4);
   border: 1px solid var(--color-border);
   border-radius: var(--radius);
   background: var(--color-surface);
@@ -470,6 +575,28 @@ textarea {
   font-family: inherit;
   font-size: var(--text-body);
   line-height: 1.6;
+  letter-spacing: var(--tracking);
+}
+
+input[type="text"]:hover:not(:disabled),
+input[type="password"]:hover:not(:disabled),
+select:hover:not(:disabled),
+textarea:hover:not(:disabled) {
+  border-color: var(--color-focus-outline);
+}
+
+input:disabled,
+select:disabled,
+textarea:disabled {
+  border-color: var(--color-disabled-fg);
+  background: var(--color-disabled-field-bg);
+  color: var(--color-disabled-field-fg);
+}
+
+/* 読み取り専用は破線で示す（DADS の :read-only の扱い） */
+input[readonly],
+textarea[readonly] {
+  border-style: dashed;
 }
 
 textarea {
@@ -521,7 +648,7 @@ textarea::placeholder {
 .choice-list {
   margin: 0;
   padding: 0;
-  border: 1px solid var(--color-border-light);
+  border: 1px solid var(--color-divider);
   border-radius: var(--radius);
   background: var(--color-surface);
   list-style: none;
@@ -532,7 +659,7 @@ textarea::placeholder {
   align-items: flex-start;
   gap: var(--space-3);
   padding: var(--space-3) var(--space-4);
-  border-top: 1px solid var(--color-border-light);
+  border-top: 1px solid var(--color-divider);
   cursor: pointer;
 }
 
@@ -577,49 +704,61 @@ textarea::placeholder {
 /* ── 通知・状態表示 ────────────────────────────────── */
 
 /*
- * 左端の帯と見出し語（「エラー」等）の2つで種類を示す。
- * 色を消しても意味が伝わることを条件にしている。
+ * DADS のノティフィケーションバナー（data-style="color-chip"）。
+ * 2px の枠と、左端の色帯（inset の box-shadow）で組む。角丸は付けない。
+ * この inset は「浮かせる影」ではなく色帯の実装手段であって、
+ * 影の禁止（一覧行・カードに影を付けない）とは別物。
+ *
+ * 見出しは種類によらず濃い文字色にする。種類は帯の色と見出し語
+ * （「エラー」「完了」「お知らせ」）の2つで示すので、色を消しても意味が伝わる。
  */
 .notice {
-  padding: var(--space-3) var(--space-4);
-  border: 1px solid var(--color-border-light);
-  border-left: 4px solid var(--color-border);
-  border-radius: var(--radius);
+  --notice-color: var(--color-primary);
+  border: 2px solid var(--notice-color);
+  box-shadow: inset 8px 0 0 0 var(--notice-color);
   background: var(--color-surface);
+  padding: var(--space-3) var(--space-4) var(--space-3) var(--space-6);
+  color: var(--color-text-body);
+}
+
+@media (min-width: 48rem) {
+  .notice {
+    box-shadow: inset 16px 0 0 0 var(--notice-color);
+    padding: var(--space-4) var(--space-6) var(--space-4) var(--space-8);
+  }
 }
 
 .notice--error {
-  border-left-color: var(--color-error);
+  --notice-color: var(--color-error);
 }
 
 .notice--success {
-  border-left-color: var(--color-success);
+  --notice-color: var(--color-success);
 }
 
 .notice--info {
-  border-left-color: var(--color-primary);
+  --notice-color: var(--color-primary);
 }
 
 .notice__title {
   margin: 0 0 var(--space-1);
+  color: var(--color-text);
   font-size: var(--text-subheading);
   font-weight: 700;
   line-height: 1.5;
 }
 
-.notice--error .notice__title {
-  color: var(--color-error);
-}
-
-.notice--success .notice__title {
-  color: var(--color-success);
+@media (min-width: 48rem) {
+  .notice__title {
+    font-size: var(--text-section);
+  }
 }
 
 .notice__body {
   margin: 0;
-  font-size: var(--text-note);
-  line-height: 1.5;
-  color: var(--color-text-sub);
+  font-size: var(--text-body);
+  line-height: 1.6;
+  color: var(--color-text-body);
 }
 
 .notice__body p {
@@ -634,8 +773,8 @@ textarea::placeholder {
 .progress {
   height: 4px;
   margin-top: var(--space-2);
-  background: var(--color-border-light);
-  border-radius: var(--radius);
+  background: var(--color-divider);
+  border-radius: var(--radius-xs);
   overflow: hidden;
 }
 
@@ -669,7 +808,7 @@ textarea::placeholder {
   position: relative;
   /* 縦長端末でも横幅を使い切り、バーコードを大きく写す */
   aspect-ratio: 4 / 3;
-  background: #000000;
+  background: var(--color-neutral-black);
   border: 1px solid var(--color-border);
   border-radius: var(--radius);
   overflow: hidden;
@@ -693,8 +832,8 @@ textarea::placeholder {
   right: 0;
   top: 27.5%;
   height: 45%;
-  border-top: 2px solid #ffffff;
-  border-bottom: 2px solid #ffffff;
+  border-top: 2px solid var(--color-neutral-white);
+  border-bottom: 2px solid var(--color-neutral-white);
   pointer-events: none;
 }
 
@@ -706,27 +845,32 @@ textarea::placeholder {
   place-items: center;
   padding: var(--space-4);
   margin: 0;
-  color: #ffffff;
+  color: var(--color-neutral-white);
   font-size: var(--text-note);
   text-align: center;
 }
 
 /* 現在の状態。カメラ領域の直下に置く（間隔は .stack が決める） */
+/*
+ * 通知バナーと同じ色帯の作りにするが、これは常時出るものなので
+ * 外周は 1px の薄線に留める。帯の色だけでなく、必ず文章で状態を書く。
+ */
 .scanner-status {
+  --status-color: var(--color-border);
   margin: 0;
-  padding: var(--space-3) var(--space-4);
-  border: 1px solid var(--color-border-light);
-  border-left: 4px solid var(--color-border);
+  padding: var(--space-3) var(--space-4) var(--space-3) var(--space-6);
+  border: 1px solid var(--color-divider);
   border-radius: var(--radius);
   background: var(--color-surface);
+  box-shadow: inset 8px 0 0 0 var(--status-color);
 }
 
 .scanner-status[data-kind="success"] {
-  border-left-color: var(--color-success);
+  --status-color: var(--color-success);
 }
 
 .scanner-status[data-kind="duplicate"] {
-  border-left-color: var(--color-error);
+  --status-color: var(--color-error);
 }
 
 .scanner-status__label {
@@ -767,13 +911,13 @@ textarea::placeholder {
   padding: 0;
   list-style: none;
   background: var(--color-surface);
-  border: 1px solid var(--color-border-light);
+  border: 1px solid var(--color-divider);
   border-radius: var(--radius);
 }
 
 .record {
   padding: var(--space-4);
-  border-top: 1px solid var(--color-border-light);
+  border-top: 1px solid var(--color-divider);
 }
 
 .record:first-child {
@@ -802,7 +946,7 @@ textarea::placeholder {
   width: 40px;
   max-height: 60px;
   object-fit: contain;
-  border-radius: 2px;
+  border-radius: var(--radius-xs);
 }
 
 .record__body {
@@ -879,7 +1023,7 @@ textarea::placeholder {
 .diff {
   margin: var(--space-3) 0 0;
   padding: var(--space-3);
-  border: 1px solid var(--color-border-light);
+  border: 1px solid var(--color-divider);
   border-radius: var(--radius);
   background: var(--color-bg);
   font-size: var(--text-note);
@@ -912,12 +1056,12 @@ textarea::placeholder {
   margin: var(--space-3) 0 0;
   padding: 0;
   list-style: none;
-  border: 1px solid var(--color-border-light);
+  border: 1px solid var(--color-divider);
   border-radius: var(--radius);
 }
 
 .candidates li + li {
-  border-top: 1px solid var(--color-border-light);
+  border-top: 1px solid var(--color-divider);
 }
 
 .candidate {
@@ -999,7 +1143,7 @@ textarea.preview {
 /* ── 折りたたみ ───────────────────────────────────── */
 
 details.disclosure {
-  border-top: 1px solid var(--color-border-light);
+  border-top: 1px solid var(--color-divider);
   margin-top: var(--space-4);
 }
 
