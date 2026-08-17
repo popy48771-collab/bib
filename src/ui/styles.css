@@ -208,44 +208,6 @@ body {
   text-decoration: none;
 }
 
-/* ── ナビゲーション ────────────────────────────────── */
-
-.site-nav {
-  background: var(--color-surface);
-  border-bottom: 1px solid var(--color-divider);
-}
-
-.site-nav ul {
-  display: flex;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.site-nav button {
-  min-height: var(--tap-min);
-  padding: var(--space-2) var(--space-3);
-  border: 0;
-  border-bottom: 3px solid transparent;
-  border-radius: 0;
-  background: none;
-  color: var(--color-text);
-  font-family: inherit;
-  font-size: var(--text-body);
-  cursor: pointer;
-}
-
-.site-nav button:hover {
-  /* 浮き上がらせず、下線だけで反応を示す */
-  border-bottom-color: var(--color-border);
-}
-
-.site-nav button[aria-current="page"] {
-  color: var(--color-primary);
-  font-weight: 700;
-  border-bottom-color: var(--color-primary);
-}
-
 /* ── 本文領域 ──────────────────────────────────────── */
 
 .main {
@@ -278,10 +240,6 @@ body {
   font-size: var(--text-note);
   line-height: 1.5;
   color: var(--color-text-sub);
-}
-
-.text-weak {
-  color: var(--color-text-weak);
 }
 
 /*
@@ -376,13 +334,6 @@ a {
 a:hover {
   color: var(--color-link-hover);
   text-decoration-thickness: 3px;
-}
-
-/* 一覧やフッターのリンクも指で押せる高さを確保する */
-.link-block {
-  display: inline-flex;
-  align-items: center;
-  min-height: var(--tap-min);
 }
 
 /* ── ボタン ────────────────────────────────────────── */
@@ -548,8 +499,7 @@ a:hover {
 }
 
 /* DADS の form-control-label[md]。ラベルは 17px 太字、下に 8px 空ける */
-.field > label,
-.field > .field-label {
+.field > label {
   display: block;
   margin-bottom: var(--space-2);
   font-size: var(--text-subheading);
@@ -615,14 +565,6 @@ textarea::placeholder {
 
 .field .note {
   margin-top: var(--space-2);
-}
-
-/* ラベルを input の前に置き、説明はその下に付ける（デジタル庁デザインシステムの並び） */
-.field-hint {
-  margin: 0 0 var(--space-2);
-  font-size: var(--text-note);
-  line-height: 1.5;
-  color: var(--color-text-sub);
 }
 
 .checkbox {
@@ -769,21 +711,6 @@ textarea::placeholder {
   margin-top: var(--space-3);
 }
 
-/* 進捗。数字と併記し、棒だけで伝えない */
-.progress {
-  height: 4px;
-  margin-top: var(--space-2);
-  background: var(--color-divider);
-  border-radius: var(--radius-xs);
-  overflow: hidden;
-}
-
-.progress > span {
-  display: block;
-  height: 100%;
-  background: var(--color-primary);
-}
-
 /* ── 定義リスト（状態の一覧表示） ────────────────────── */
 
 .status-line {
@@ -887,17 +814,47 @@ textarea::placeholder {
   overflow-wrap: anywhere;
 }
 
-.scanner-log {
-  margin: 0;
+/*
+ * 読み取った端から書名が入っていく一覧。
+ * 状態は data-state に持たせるが、色ではなく文言で伝える。
+ */
+.scan-feed {
+  margin: var(--space-2) 0 0;
   padding: 0;
   list-style: none;
-  font-size: var(--text-note);
-  color: var(--color-text-sub);
-  font-variant-numeric: tabular-nums;
+  border: 1px solid var(--color-divider);
+  border-radius: var(--radius);
+  background: var(--color-surface);
 }
 
-.scanner-log li + li {
-  margin-top: var(--space-1);
+.scan-feed li {
+  padding: var(--space-2) var(--space-3);
+  border-top: 1px solid var(--color-divider);
+  font-size: var(--text-note);
+  line-height: 1.5;
+}
+
+.scan-feed li:first-child {
+  border-top: 0;
+}
+
+.scan-feed__title {
+  display: block;
+  color: var(--color-text);
+}
+
+.scan-feed li[data-state="looking"] .scan-feed__title {
+  color: var(--color-text-sub);
+}
+
+.scan-feed li[data-state="missing"] .scan-feed__title {
+  color: var(--color-error);
+}
+
+.scan-feed__isbn {
+  display: block;
+  color: var(--color-text-weak);
+  font-variant-numeric: tabular-nums;
 }
 
 /* ── 書誌一覧（OPAC 風） ───────────────────────────── */
@@ -1125,38 +1082,6 @@ textarea.preview {
   line-height: 1.5;
 }
 
-/* ── 手順表示 ─────────────────────────────────────── */
-
-.steps {
-  margin: 0;
-  padding-left: var(--space-6);
-}
-
-.steps > li + li {
-  margin-top: var(--space-6);
-}
-
-.steps p {
-  margin: 0 0 var(--space-3);
-}
-
-/* ── 折りたたみ ───────────────────────────────────── */
-
-details.disclosure {
-  border-top: 1px solid var(--color-divider);
-  margin-top: var(--space-4);
-}
-
-details.disclosure > summary {
-  min-height: var(--tap-min);
-  display: flex;
-  align-items: center;
-  padding: var(--space-2) 0;
-  color: var(--color-primary);
-  font-size: var(--text-note);
-  cursor: pointer;
-}
-
 /* ── 補助 ──────────────────────────────────────────── */
 
 .visually-hidden {
@@ -1174,8 +1099,4 @@ details.disclosure > summary {
 code {
   font-family: var(--font-mono);
   font-size: var(--text-note);
-}
-
-.table-scroll {
-  overflow-x: auto;
 }

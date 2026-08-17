@@ -1,31 +1,36 @@
 /**
- * 段階実行パイプライン
+ * 書誌照合パイプライン
  *
- * 各段階は独立して実行でき、以下の性質を満たす:
+ * 1冊が入ってきたら、書誌が埋まるまで自動で追いかける。以下の性質を満たす:
  *
- *  1. 冪等   … 同じ段階を再実行しても結果が壊れない
- *  2. 非破壊 … 後の段階は前の段階の候補を消さない(candidates に足すだけ)
- *  3. 隔離   … ある段階が失敗しても、他の段階の成果は残る
+ *  1. 冪等   … 同じ項目を再照合しても結果が壊れない
+ *  2. 非破壊 … 後のソースは前のソースの候補を消さない(candidates に足すだけ)
+ *  3. 隔離   … あるソースが落ちていても、他のソースの成果は残る
  *  4. 尊重   … 利用者が手で確定した項目(pinned)は自動処理で上書きしない
  *
- * この性質があるため「Google Books で一次照合 → 結果を見てから
- * ボタンで NDL と突合」という運用が安全に成立する。
+ * かつては段階ごとにボタンを押させていたが、バーコードは誤読がほぼ無く
+ * 人間のトリアージを挟む必要がない。押さなくても済む操作を残しておくと、
+ * 「読んだのに一覧が空」という状態が生まれてしまうので、
+ * 1冊読むたびにここまで自動で走らせる。
  */
 
 import {
   AUTO_CONFIRM_THRESHOLD,
   CANDIDATE_FLOOR,
+  GOOGLE_BOOKS_COUNTRY,
+  NDL_PROXY_URL,
   type BibRecord,
   type BookEntry,
+  type ExtractedSpine,
   type FieldConflict,
   type ScoredCandidate,
 } from '../types'
 import { matchScore } from '../lib/similarity'
 import { normalizeForMatch } from '../lib/normalize'
+import { isIsbnBarcode } from '../lib/barcode'
 import * as googleBooks from '../sources/googleBooks'
 import * as ndl from '../sources/ndl'
 import * as openbd from '../sources/openbd'
-import type { ExtractedSpine } from '../sources/vlm'
 
 /**
  * フィールドを型を保ったまま代入する。
@@ -68,10 +73,13 @@ export function adoptCandidate(entry: BookEntry, candidate: ScoredCandidate): Bo
 }
 
 // ───────────────────────────────────────────────────────────
-// 段階 0: 抽出 (写真 → 背表紙テキスト)
+// 入口: 読み取り結果 → BookEntry
 // ───────────────────────────────────────────────────────────
 
-/** 抽出結果から BookEntry を作る。この時点では未確認 */
+/**
+ * 背表紙の読み取り結果から BookEntry を作る。この時点では未確認。
+ * 読み取り手段(写真・映像・OCR)が何であれ、ここから先は共通の照合に乗る。
+ */
 export function entriesFromExtraction(
   photoId: string,
   spines: ExtractedSpine[],
@@ -86,7 +94,8 @@ export function entriesFromExtraction(
     box: s.box,
     candidates: {},
     provenance: {},
-    // 書誌DBで実在確認が取れるまでは確定させない(VLMの捏造対策)
+    // 書誌DBで実在確認が取れるまでは確定させない。
+    // 背表紙の読み取りは「それらしいが存在しない本」を出しうる
     status: 'unverified',
     pinned: false,
   }))
@@ -114,22 +123,15 @@ export function entriesFromIsbns(isbns: readonly string[], idPrefix: string): Bo
 }
 
 // ───────────────────────────────────────────────────────────
-// 段階 1: Google Books 照合
+// 照合の共通部品
 // ───────────────────────────────────────────────────────────
 
 export interface StageContext {
   signal?: AbortSignal
   /** 1件処理するたびに呼ばれる。UI の進捗表示用 */
   onProgress?: (done: number, total: number) => void
-  /**
-   * 1件の取得に失敗したときに呼ばれる。
-   *
-   * 段階は「隔離」の性質を保つため個別の失敗では中断しないが、
-   * 黙って飛ばすと通信が切れていても成功と区別できない。
-   * 件数を数えて利用者に伝えるのは呼び出し側の仕事。
-   */
-  onEntryError?: (err: unknown) => void
-  settings: { ndlProxyUrl: string; googleBooksCountry: string }
+  /** 1件解決するたびに呼ばれる。まとめて待たずに一覧へ流し込むために使う */
+  onEntry?: (entry: BookEntry) => void
 }
 
 /** レート制限対策。Google Books は IP 単位で絞られるため間隔を空ける */
@@ -148,109 +150,27 @@ function delay(ms: number, signal?: AbortSignal): Promise<void> {
   })
 }
 
-const GOOGLE_BOOKS_INTERVAL_MS = 260
+const LOOKUP_INTERVAL_MS = 260
+
+/** 中断だけは上へ抜かす。通信の失敗はその場で飲んで次のソースへ回す */
+function rethrowAbort(err: unknown): void {
+  if (err instanceof DOMException && err.name === 'AbortError') throw err
+}
 
 /**
- * Google Books で一次照合する。
- * ここで確定したものが「一次確定」。NDL 突合はこの後の任意ステージ。
+ * この項目の ISBN。判っていれば完全一致で引ける。
+ *
+ * 照合が一度通ると provenance.isbn13 は書誌ソース側に移るが、
+ * バーコードで読んだ値は rawText に残っているので、再照合でも見失わない。
  */
-/** この項目は ISBN が確定しているか(バーコード経由か) */
 function knownIsbnOf(entry: BookEntry): string | undefined {
-  return entry.provenance.isbn13 === 'barcode' ? entry.resolved?.isbn13 : undefined
+  if (entry.provenance.isbn13 === 'barcode') return entry.resolved?.isbn13
+  return isIsbnBarcode(entry.rawText) ? entry.rawText : undefined
 }
 
 /** 自動処理の対象外(手動確定済み・除外済み) */
 function isUntouchable(entry: BookEntry): boolean {
   return entry.pinned || entry.status === 'excluded'
-}
-
-export async function runGoogleBooksStage(
-  entries: BookEntry[],
-  ctx: StageContext,
-): Promise<BookEntry[]> {
-  // ISBN が判っているものは、まず openBD でまとめて引く。
-  //
-  // Google Books は日本語書籍のカバレッジが弱く、バーコードで読んだ和書は
-  // かなりの割合で空振りする。openBD は ISBN 引き専用だが日本の書籍に強く、
-  // しかも一度に50件まとめて取れるので、先に当てた方が速くよく当たる。
-  // ここで外れたものだけ Google Books に回す。
-  const isbnTargets = entries.filter((e) => !isUntouchable(e) && knownIsbnOf(e))
-  let openbdHits = new Map<string, BibRecord>()
-  if (isbnTargets.length > 0) {
-    try {
-      openbdHits = await openbd.fetchByIsbns(
-        isbnTargets.map((e) => knownIsbnOf(e)!),
-        ctx.signal,
-      )
-    } catch (err) {
-      if (err instanceof DOMException && err.name === 'AbortError') throw err
-      // openBD が落ちていても Google Books 経路は生かす
-      ctx.onEntryError?.(err)
-    }
-  }
-
-  const out: BookEntry[] = []
-  let done = 0
-
-  for (const entry of entries) {
-    if (ctx.signal?.aborted) throw new DOMException('Aborted', 'AbortError')
-
-    // 手動確定済み・除外済みは触らない
-    if (entry.pinned || entry.status === 'excluded') {
-      out.push(entry)
-      done++
-      ctx.onProgress?.(done, entries.length)
-      continue
-    }
-
-    try {
-      // ISBN が既に判っている(バーコード経路)なら ISBN で引く。
-      // 完全一致なので、タイトル類似度による絞り込みは不要かつ有害
-      const knownIsbn = knownIsbnOf(entry)
-
-      if (knownIsbn) {
-        const fromOpenBd = openbdHits.get(knownIsbn)
-        if (fromOpenBd) {
-          // openBD で当たった。Google Books を引く必要はない
-          out.push(mergeIsbnResult(entry, knownIsbn, [{ record: fromOpenBd, score: 1 }], 'openbd'))
-          done++
-          ctx.onProgress?.(done, entries.length)
-          continue // openBD はまとめ取得済みなので待たなくてよい
-        }
-        const records = await googleBooks.searchByIsbn(knownIsbn, {
-          country: ctx.settings.googleBooksCountry,
-          signal: ctx.signal,
-        })
-        out.push(mergeIsbnResult(entry, knownIsbn, scoreIsbnCandidates(knownIsbn, records)))
-      } else {
-        const records = await googleBooks.searchByTitle(
-          entry.extracted.title || entry.rawText,
-          entry.extracted.authors,
-          { country: ctx.settings.googleBooksCountry, signal: ctx.signal },
-        )
-        const scored = scoreCandidates(entry, records)
-        const top = scored[0]
-
-        let next: BookEntry = {
-          ...entry,
-          candidates: { ...entry.candidates, googleBooks: scored },
-          status: statusFromScore(top),
-        }
-        if (top) next = { ...adoptCandidate(next, top), status: next.status }
-        out.push(next)
-      }
-    } catch (err) {
-      if (err instanceof DOMException && err.name === 'AbortError') throw err
-      // 1件の失敗で全体を止めない。未確認のまま残す
-      ctx.onEntryError?.(err)
-      out.push({ ...entry, status: entry.resolved ? entry.status : 'unverified' })
-    }
-
-    done++
-    ctx.onProgress?.(done, entries.length)
-    if (done < entries.length) await delay(GOOGLE_BOOKS_INTERVAL_MS, ctx.signal)
-  }
-  return out
 }
 
 /**
@@ -275,7 +195,7 @@ export function mergeIsbnResult(
   isbn13: string,
   scored: ScoredCandidate[],
   /** どのソースから来た候補か。candidates のどの欄に積むかを決める */
-  from: 'googleBooks' | 'openbd' = 'googleBooks',
+  from: 'googleBooks' | 'openbd' | 'ndl' = 'googleBooks',
 ): BookEntry {
   const next: BookEntry = { ...entry, candidates: { ...entry.candidates, [from]: scored } }
   const top = scored[0]
@@ -298,7 +218,7 @@ export function mergeIsbnResult(
 }
 
 // ───────────────────────────────────────────────────────────
-// 段階 2: NDL 突合 (任意・ボタン起動)
+// NDL 突合
 // ───────────────────────────────────────────────────────────
 
 /** 比較対象のフィールド。表記揺れが激しいものは入れない */
@@ -336,7 +256,7 @@ export function diffRecords(a: BibRecord, b: BibRecord): FieldConflict[] {
 }
 
 /**
- * NDL で突合する。
+ * NDL の結果を既存エントリに統合する。純粋関数なのでテストしやすい。
  *
  * 一次照合の結果を上書きせず、
  *  - NDL 側の候補を candidates.ndl に追加
@@ -344,54 +264,6 @@ export function diffRecords(a: BibRecord, b: BibRecord): FieldConflict[] {
  *  - 一次照合で見つからなかった項目は、NDL でヒットすれば昇格させる
  *  - 一次結果に欠けているフィールド(ISBN等)は NDL の値で補完する
  * という振る舞いにする。
- */
-export async function runNdlStage(entries: BookEntry[], ctx: StageContext): Promise<BookEntry[]> {
-  if (!ndl.isNdlConfigured(ctx.settings.ndlProxyUrl)) {
-    throw new ndl.NdlNotConfiguredError()
-  }
-
-  const out: BookEntry[] = []
-  let done = 0
-
-  for (const entry of entries) {
-    if (ctx.signal?.aborted) throw new DOMException('Aborted', 'AbortError')
-
-    if (entry.pinned || entry.status === 'excluded') {
-      out.push(entry)
-      done++
-      ctx.onProgress?.(done, entries.length)
-      continue
-    }
-
-    try {
-      // ISBN が既に判っているならそれで引く方が確実
-      const isbn = entry.resolved?.isbn13
-      const records = isbn
-        ? await ndl.searchByIsbn(isbn, { proxyUrl: ctx.settings.ndlProxyUrl, signal: ctx.signal })
-        : await ndl.searchByTitle(
-            entry.extracted.title || entry.rawText,
-            entry.extracted.authors,
-            { proxyUrl: ctx.settings.ndlProxyUrl, signal: ctx.signal },
-          )
-
-      const scored = scoreCandidates(entry, records)
-      out.push(mergeNdlResult(entry, scored))
-    } catch (err) {
-      if (err instanceof DOMException && err.name === 'AbortError') throw err
-      if (err instanceof ndl.NdlNotConfiguredError) throw err
-      // 通信失敗は一次結果を壊さずに素通り
-      ctx.onEntryError?.(err)
-      out.push(entry)
-    }
-
-    done++
-    ctx.onProgress?.(done, entries.length)
-  }
-  return out
-}
-
-/**
- * NDL の結果を既存エントリに統合する。純粋関数なのでテストしやすい。
  */
 export function mergeNdlResult(entry: BookEntry, scored: ScoredCandidate[]): BookEntry {
   const next: BookEntry = { ...entry, candidates: { ...entry.candidates, ndl: scored } }
@@ -435,57 +307,127 @@ export function mergeNdlResult(entry: BookEntry, scored: ScoredCandidate[]): Boo
 }
 
 // ───────────────────────────────────────────────────────────
-// 段階 3: openBD エンリッチ (任意・ボタン起動)
+// 自動照合
 // ───────────────────────────────────────────────────────────
 
 /**
- * ISBN が確定している項目に、書影・出版社・発売日・内容紹介を補う。
- * 照合は行わない(openBD はタイトル検索ができないため)。
+ * 1冊を書誌DBで解決する。書誌が埋まった時点で打ち切る。
+ *
+ * ISBN が判っている(バーコード経路)なら完全一致で引けるので
+ *   openBD → Google Books → NDL
+ * の順に当てる。日本語書籍は openBD が最も速くよく当たり、Google Books は
+ * 和書のカバレッジが弱い一方で洋書に強く、NDL は法定納本ぶん網羅性が最も高い。
+ * 「まず当たりやすいものを1リクエストで、外れたら網羅的なものへ」の並びである。
+ *
+ * ISBN が無い(背表紙経路)なら書名で照合する。こちらは読み取り自体が曖昧なので
+ * 類似度で絞り、確信が持てなければ確定させずに人間の判断へ回す。
+ *
+ * どのソースが落ちていても例外は投げない。引けなかった項目は notFound の
+ * まま一覧に残り、あとから再照合できる。中断(AbortError)だけは上へ抜ける。
  */
-export async function runOpenBdStage(entries: BookEntry[], ctx: StageContext): Promise<BookEntry[]> {
-  const isbns = entries
-    .filter((e) => e.status !== 'excluded' && e.resolved?.isbn13)
-    .map((e) => e.resolved!.isbn13!)
+export async function resolveEntry(entry: BookEntry, ctx: StageContext = {}): Promise<BookEntry> {
+  if (isUntouchable(entry)) return entry
+  const isbn = knownIsbnOf(entry)
+  return isbn ? resolveByIsbn(entry, isbn, ctx) : resolveByTitle(entry, ctx)
+}
 
-  if (isbns.length === 0) return entries
+/** ISBN 完全一致で引く。一致するので類似度による絞り込みはしない */
+async function resolveByIsbn(
+  entry: BookEntry,
+  isbn13: string,
+  ctx: StageContext,
+): Promise<BookEntry> {
+  let current = entry
 
-  const byIsbn = await openbd.fetchByIsbns(isbns, ctx.signal)
-  ctx.onProgress?.(entries.length, entries.length)
+  try {
+    const hit = (await openbd.fetchByIsbns([isbn13], ctx.signal)).get(isbn13)
+    if (hit) return mergeIsbnResult(current, isbn13, [{ record: hit, score: 1 }], 'openbd')
+  } catch (err) {
+    rethrowAbort(err)
+  }
 
-  return entries.map((entry) => {
-    const isbn = entry.resolved?.isbn13
-    if (!isbn || entry.pinned) return entry
-    const found = byIsbn.get(isbn)
-    if (!found) return entry
+  try {
+    const records = await googleBooks.searchByIsbn(isbn13, {
+      country: GOOGLE_BOOKS_COUNTRY,
+      signal: ctx.signal,
+    })
+    const merged = mergeIsbnResult(current, isbn13, scoreIsbnCandidates(isbn13, records))
+    if (merged.status === 'confirmed') return merged
+    current = merged
+  } catch (err) {
+    rethrowAbort(err)
+  }
 
-    // まだ書名が入っていない = ISBN は読めたが照合で当たらなかった項目。
-    // openBD にデータがあるならここで救済して確定させる。
-    // 空欄補完だけでは、書名が無いまま一覧に残り続けてしまう。
-    if (!entry.resolved?.title) {
-      return {
-        ...mergeIsbnResult(entry, isbn, [{ record: found, score: 1 }], 'openbd'),
-        candidates: { ...entry.candidates, openbd: [{ record: found, score: 1 }] },
-      }
+  try {
+    const records = await ndl.searchByIsbn(isbn13, { proxyUrl: NDL_PROXY_URL, signal: ctx.signal })
+    const merged = mergeIsbnResult(current, isbn13, scoreIsbnCandidates(isbn13, records), 'ndl')
+    if (merged.status === 'confirmed') return merged
+    current = merged
+  } catch (err) {
+    rethrowAbort(err)
+  }
+
+  return current
+}
+
+/** 書名で照合する。読み取りが曖昧なぶん、確信が持てなければ確定させない */
+async function resolveByTitle(entry: BookEntry, ctx: StageContext): Promise<BookEntry> {
+  const title = entry.extracted.title || entry.rawText
+  let current = entry
+
+  try {
+    const records = await googleBooks.searchByTitle(title, entry.extracted.authors, {
+      country: GOOGLE_BOOKS_COUNTRY,
+      signal: ctx.signal,
+    })
+    const scored = scoreCandidates(entry, records)
+    const top = scored[0]
+    let next: BookEntry = {
+      ...current,
+      candidates: { ...current.candidates, googleBooks: scored },
+      status: statusFromScore(top),
     }
+    if (top) next = { ...adoptCandidate(next, top), status: next.status }
+    if (next.status === 'confirmed') return next
+    current = next
+  } catch (err) {
+    rethrowAbort(err)
+  }
 
-    const resolved: BibRecord = { ...entry.resolved! }
-    const provenance = { ...entry.provenance }
+  try {
+    const records = await ndl.searchByTitle(title, entry.extracted.authors, {
+      proxyUrl: NDL_PROXY_URL,
+      signal: ctx.signal,
+    })
+    current = mergeNdlResult(current, scoreCandidates(entry, records))
+  } catch (err) {
+    rethrowAbort(err)
+  }
 
-    // 空欄のみ補完する。既存の値は上書きしない
-    for (const field of ['publisher', 'published', 'series', 'coverUrl', 'description'] as const) {
-      const current = resolved[field]
-      const incoming = found[field]
-      if ((current === undefined || current === '') && incoming) {
-        assignField(resolved, field, incoming)
-        provenance[field] = 'openbd'
-      }
-    }
+  return current
+}
 
-    return {
-      ...entry,
-      candidates: { ...entry.candidates, openbd: [{ record: found, score: 1 }] },
-      resolved,
-      provenance,
-    }
-  })
+/**
+ * まとめて解決する。1件の失敗が他を巻き込まないよう、例外は各件で閉じる。
+ * 解決したそばから onEntry で返すので、呼び出し側は全件を待たずに描ける。
+ */
+export async function resolveEntries(
+  entries: BookEntry[],
+  ctx: StageContext = {},
+): Promise<BookEntry[]> {
+  const out: BookEntry[] = []
+  let done = 0
+
+  for (const entry of entries) {
+    if (ctx.signal?.aborted) throw new DOMException('Aborted', 'AbortError')
+
+    const next = await resolveEntry(entry, ctx)
+    out.push(next)
+    ctx.onEntry?.(next)
+
+    done++
+    ctx.onProgress?.(done, entries.length)
+    if (done < entries.length) await delay(LOOKUP_INTERVAL_MS, ctx.signal)
+  }
+  return out
 }

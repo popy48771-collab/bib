@@ -83,11 +83,9 @@ interface Props {
   onRestore: (entryId: string) => void
   /** 一覧から完全に削除する */
   onDelete: (entryId: string) => void
-  /** 読み取り画面へ移動する。一覧が空のときの案内に使う */
-  onOpenRead: () => void
 }
 
-type RowProps = { entry: BookEntry } & Omit<Props, 'entries' | 'onOpenRead'>
+type RowProps = { entry: BookEntry } & Omit<Props, 'entries'>
 
 /** 全候補をソース混在でスコア順に並べる */
 function allCandidates(entry: BookEntry): ScoredCandidate[] {
@@ -253,24 +251,14 @@ function BookRow({ entry, onAdopt, onExclude, onRestore, onDelete }: RowProps) {
   )
 }
 
-export function BookList({
-  entries,
-  onAdopt,
-  onExclude,
-  onRestore,
-  onDelete,
-  onOpenRead,
-}: Props) {
+export function BookList({ entries, onAdopt, onExclude, onRestore, onDelete }: Props) {
   if (entries.length === 0) {
     return (
       <div className="panel stack">
         <p>登録された本はまだありません。</p>
         <p className="note">
-          読み取り画面で本のバーコードを読み取ると、ここに一覧が表示されます。
+          カメラを開始して本のバーコードをかざすと、読み取った順にここへ並びます。
         </p>
-        <button type="button" className="button button--primary" onClick={onOpenRead}>
-          読み取り画面を開く
-        </button>
       </div>
     )
   }
