@@ -106,3 +106,46 @@ describe('mergeIsbnResult', () => {
     expect(twice).toEqual(once)
   })
 })
+
+/**
+ * Google Books は日本語書籍のカバレッジが弱く、バーコードで読んだ和書は
+ * かなりの割合で空振りする。ISBN が判っている項目は openBD を先に当て、
+ * それでも駄目なら openBD 段階で救済する、という二段構えを保証する。
+ */
+describe('openBD による救済', () => {
+  const openbdRecord: BibRecord = {
+    title: '日本語の本',
+    authors: ['著者名'],
+    publisher: 'ある出版社',
+    published: '2005-10',
+    isbn13: ISBN,
+    source: 'openbd',
+  }
+
+  it('openBD の結果で確定でき、出典が openbd になる', () => {
+    const entry = entriesFromIsbns([ISBN], 'scan1')[0]
+    const merged = mergeIsbnResult(entry, ISBN, [{ record: openbdRecord, score: 1 }], 'openbd')
+    expect(merged.status).toBe('confirmed')
+    expect(merged.resolved?.title).toBe('日本語の本')
+    expect(merged.resolved?.source).toBe('openbd')
+  })
+
+  it('候補は openbd 欄に積み、googleBooks 欄を汚さない', () => {
+    const entry = entriesFromIsbns([ISBN], 'scan1')[0]
+    const merged = mergeIsbnResult(entry, ISBN, [{ record: openbdRecord, score: 1 }], 'openbd')
+    expect(merged.candidates.openbd).toHaveLength(1)
+    expect(merged.candidates.googleBooks).toBeUndefined()
+  })
+
+  it('Google Books で空振りした項目を後から救済できる', () => {
+    // 照合段階で notFound になった状態(書名が空のまま ISBN だけ残る)
+    const missed = mergeIsbnResult(entriesFromIsbns([ISBN], 'scan1')[0], ISBN, [])
+    expect(missed.status).toBe('notFound')
+    expect(missed.resolved?.title).toBe('')
+
+    const rescued = mergeIsbnResult(missed, ISBN, [{ record: openbdRecord, score: 1 }], 'openbd')
+    expect(rescued.status).toBe('confirmed')
+    expect(rescued.resolved?.title).toBe('日本語の本')
+    expect(rescued.resolved?.isbn13).toBe(ISBN)
+  })
+})

@@ -319,8 +319,8 @@ export function App() {
     {
       id: 'googleBooks',
       n: 2,
-      title: 'Google Books で照合する',
-      desc: '読み取った文字列を書誌データベースで照合し、実在が確認できたものを確定します。',
+      title: "書誌データベースで照合する",
+      desc: "読み取った内容を書誌データベースで照合し、実在が確認できたものを確定します。ISBN が判っているものは日本の書籍に強い openBD を先に当てます。",
       action: (
         <button
           className="primary"

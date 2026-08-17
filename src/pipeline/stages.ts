@@ -146,10 +146,40 @@ const GOOGLE_BOOKS_INTERVAL_MS = 260
  * Google Books で一次照合する。
  * ここで確定したものが「一次確定」。NDL 突合はこの後の任意ステージ。
  */
+/** この項目は ISBN が確定しているか(バーコード経由か) */
+function knownIsbnOf(entry: BookEntry): string | undefined {
+  return entry.provenance.isbn13 === 'barcode' ? entry.resolved?.isbn13 : undefined
+}
+
+/** 自動処理の対象外(手動確定済み・除外済み) */
+function isUntouchable(entry: BookEntry): boolean {
+  return entry.pinned || entry.status === 'excluded'
+}
+
 export async function runGoogleBooksStage(
   entries: BookEntry[],
   ctx: StageContext,
 ): Promise<BookEntry[]> {
+  // ISBN が判っているものは、まず openBD でまとめて引く。
+  //
+  // Google Books は日本語書籍のカバレッジが弱く、バーコードで読んだ和書は
+  // かなりの割合で空振りする。openBD は ISBN 引き専用だが日本の書籍に強く、
+  // しかも一度に50件まとめて取れるので、先に当てた方が速くよく当たる。
+  // ここで外れたものだけ Google Books に回す。
+  const isbnTargets = entries.filter((e) => !isUntouchable(e) && knownIsbnOf(e))
+  let openbdHits = new Map<string, BibRecord>()
+  if (isbnTargets.length > 0) {
+    try {
+      openbdHits = await openbd.fetchByIsbns(
+        isbnTargets.map((e) => knownIsbnOf(e)!),
+        ctx.signal,
+      )
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') throw err
+      // openBD が落ちていても Google Books 経路は生かす
+    }
+  }
+
   const out: BookEntry[] = []
   let done = 0
 
@@ -167,9 +197,17 @@ export async function runGoogleBooksStage(
     try {
       // ISBN が既に判っている(バーコード経路)なら ISBN で引く。
       // 完全一致なので、タイトル類似度による絞り込みは不要かつ有害
-      const knownIsbn = entry.provenance.isbn13 === 'barcode' ? entry.resolved?.isbn13 : undefined
+      const knownIsbn = knownIsbnOf(entry)
 
       if (knownIsbn) {
+        const fromOpenBd = openbdHits.get(knownIsbn)
+        if (fromOpenBd) {
+          // openBD で当たった。Google Books を引く必要はない
+          out.push(mergeIsbnResult(entry, knownIsbn, [{ record: fromOpenBd, score: 1 }], 'openbd'))
+          done++
+          ctx.onProgress?.(done, entries.length)
+          continue // openBD はまとめ取得済みなので待たなくてよい
+        }
         const records = await googleBooks.searchByIsbn(knownIsbn, {
           country: ctx.settings.googleBooksCountry,
           signal: ctx.signal,
@@ -226,8 +264,10 @@ export function mergeIsbnResult(
   entry: BookEntry,
   isbn13: string,
   scored: ScoredCandidate[],
+  /** どのソースから来た候補か。candidates のどの欄に積むかを決める */
+  from: 'googleBooks' | 'openbd' = 'googleBooks',
 ): BookEntry {
-  const next: BookEntry = { ...entry, candidates: { ...entry.candidates, googleBooks: scored } }
+  const next: BookEntry = { ...entry, candidates: { ...entry.candidates, [from]: scored } }
   const top = scored[0]
 
   // ISBN は読めたが書誌DBに無い。ISBN は確かなので捨てず、未確認として残す
@@ -406,6 +446,16 @@ export async function runOpenBdStage(entries: BookEntry[], ctx: StageContext): P
     if (!isbn || entry.pinned) return entry
     const found = byIsbn.get(isbn)
     if (!found) return entry
+
+    // まだ書名が入っていない = ISBN は読めたが照合で当たらなかった項目。
+    // openBD にデータがあるならここで救済して確定させる。
+    // 空欄補完だけでは、書名が無いまま一覧に残り続けてしまう。
+    if (!entry.resolved?.title) {
+      return {
+        ...mergeIsbnResult(entry, isbn, [{ record: found, score: 1 }], 'openbd'),
+        candidates: { ...entry.candidates, openbd: [{ record: found, score: 1 }] },
+      }
+    }
 
     const resolved: BibRecord = { ...entry.resolved! }
     const provenance = { ...entry.provenance }
