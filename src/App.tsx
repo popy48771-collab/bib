@@ -16,9 +16,11 @@ import { SettingsPanel } from './ui/SettingsPanel'
 import { BookList } from './ui/BookList'
 import { ExportPanel } from './ui/ExportPanel'
 import { BarcodeScanner } from './ui/BarcodeScanner'
+import { ChatImportPanel } from './ui/ChatImportPanel'
+import type { ExtractedSpine } from './sources/vlm'
 
-/** 読み取り方式。どちらも同じ書誌パイプラインへ合流する */
-type InputMode = 'barcode' | 'spine'
+/** 読み取り方式。いずれも同じ書誌パイプラインへ合流する */
+type InputMode = 'barcode' | 'spine' | 'chat'
 
 interface StageState {
   status: StageStatus
@@ -184,6 +186,32 @@ export function App() {
     [entries, commit, setStage],
   )
 
+  /**
+   * チャットAIの結果を取り込む。
+   * 書名は背表紙経路と同じく未確認として入れ、ISBN はバーコード経路と同じ扱いにする。
+   * どちらも次段の書誌照合で実在確認される。
+   */
+  const onChatImport = useCallback(
+    (spines: ExtractedSpine[], isbns: string[]) => {
+      setError(null)
+      const batchId = newId()
+      const added = [
+        ...entriesFromExtraction(batchId, spines, batchId),
+        ...entriesFromIsbns(isbns, `${batchId}-isbn`),
+      ]
+      if (added.length === 0) return
+      commit([...entries, ...added])
+      setStage('extract', { status: 'done' })
+      setStages((p) => ({
+        ...p,
+        googleBooks: { status: 'idle' },
+        ndl: { status: 'idle' },
+        openbd: { status: 'idle' },
+      }))
+    },
+    [entries, commit, setStage],
+  )
+
   // ── 手動操作 ────────────────────────────────────────
   const onAdopt = useCallback(
     (entryId: string, candidate: ScoredCandidate) => {
@@ -239,15 +267,22 @@ export function App() {
     {
       id: 'extract',
       n: 1,
-      title: inputMode === 'barcode' ? 'バーコードを読み取る' : '写真から背表紙を読み取る',
+      title:
+        inputMode === 'barcode'
+          ? 'バーコードを読み取る'
+          : inputMode === 'chat'
+            ? 'チャットAIに読み取らせる'
+            : '写真から背表紙を読み取る',
       desc:
         inputMode === 'barcode'
           ? 'カメラをバーコードにかざすだけで次々に読み取ります。APIキー不要・通信なし・課金なしで、誤読もほぼありません。'
-          : vlmReady
-            ? '本棚の写真を選ぶと、背表紙のタイトル・著者を読み取ります。1段ずつ画面いっぱいに撮ると精度が上がります。'
-            : 'この方式にはAPIキーが必要です。設定を開いて登録するか、バーコード方式に切り替えてください。',
+          : inputMode === 'chat'
+            ? 'お使いのチャットAIに写真を渡して読み取らせ、結果をここに貼り付けます。既に契約しているサブスクをそのまま使えるので、API課金は発生しません。'
+            : vlmReady
+              ? '本棚の写真を選ぶと、背表紙のタイトル・著者を読み取ります。1段ずつ画面いっぱいに撮ると精度が上がります。'
+              : 'この方式にはAPIキーが必要です。設定を開いて登録するか、他の方式に切り替えてください。',
       action:
-        inputMode === 'barcode' ? (
+        inputMode === 'chat' ? null : inputMode === 'barcode' ? (
           <button className="primary" disabled={busy} onClick={() => setScanning(true)}>
             カメラを起動
           </button>
@@ -357,13 +392,22 @@ export function App() {
         </button>
         <button
           className="mode"
+          aria-pressed={inputMode === 'chat'}
+          disabled={busy}
+          onClick={() => setInputMode('chat')}
+        >
+          <span className="mode-title">チャットAI</span>
+          <span className="mode-note">課金なし・棚ごと／貼り付け手動</span>
+        </button>
+        <button
+          className="mode"
           aria-pressed={inputMode === 'spine'}
           disabled={busy}
           onClick={() => setInputMode('spine')}
         >
           <span className="mode-title">背表紙の写真</span>
           <span className="mode-note">
-            {vlmReady ? '棚ごと一度に／APIキー必要' : 'APIキー未設定'}
+            {vlmReady ? '全自動／APIキーと課金が必要' : 'APIキー未設定'}
           </span>
         </button>
       </div>
@@ -375,6 +419,8 @@ export function App() {
           onCancel={() => setScanning(false)}
         />
       )}
+
+      {inputMode === 'chat' && <ChatImportPanel onImport={onChatImport} disabled={busy} />}
 
       <div className="stages">
         {stageDefs.map((s) => {

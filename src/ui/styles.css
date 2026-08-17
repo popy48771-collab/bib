@@ -444,7 +444,8 @@ details.settings > div {
 
 .modes {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  /* 3方式が狭い画面でも潰れないよう、入る分だけ横に並べる */
+  grid-template-columns: repeat(auto-fit, minmax(9.5rem, 1fr));
   gap: 0.5rem;
   margin: 1.25rem 0;
 }
@@ -582,4 +583,74 @@ details.settings > div {
   gap: 0.5rem;
   margin-top: 0.8rem;
   flex-wrap: wrap;
+}
+
+
+/* ── チャットAI経由の取り込み ─────────────────────────── */
+
+.chat-import {
+  margin: 1rem 0 1.5rem;
+  padding: 0.85rem 0.95rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.chat-steps {
+  margin: 0;
+  padding-left: 1.3rem;
+}
+
+.chat-steps > li {
+  margin-bottom: 1.1rem;
+}
+
+.chat-steps > li:last-child {
+  margin-bottom: 0;
+}
+
+.chat-steps p {
+  margin: 0 0 0.5rem;
+  font-size: 0.85rem;
+  line-height: 1.55;
+}
+
+.chat-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.chat-toast {
+  margin: 0.5rem 0 0;
+  padding: 0.4rem 0.6rem;
+  border-radius: 6px;
+  background: var(--accent-soft);
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+
+.chat-prompt {
+  margin-top: 0.6rem;
+}
+
+.chat-prompt summary {
+  font-size: 0.78rem;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.chat-import textarea {
+  width: 100%;
+  box-sizing: border-box;
+  margin-top: 0.4rem;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 0.8rem;
+  line-height: 1.5;
+  resize: vertical;
 }
