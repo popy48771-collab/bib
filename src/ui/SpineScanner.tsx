@@ -14,6 +14,8 @@ import {
   type GrayImage,
 } from '../lib/spine/capture'
 import { Notice } from './Notice'
+import { signalHit } from './feedback'
+import { describeCloseHint, describeSpineStatus } from './spineStatus'
 import type { CaptureOutcome, FrameCapture } from './useSpineScan'
 
 /** 1冊ぶんの照合状況。スキャナはこれを表示するだけで、照合自体は関与しない */
@@ -193,7 +195,11 @@ export function SpineScanner({
 
       const outcome = liveRef.current.onCapture(shot)
       setLastOutcome(outcome)
-      if (outcome === 'queued') setCaptured((n) => n + 1)
+      if (outcome === 'queued') {
+        // 目は棚を見ているので、撮れたことは振動で返す
+        signalHit()
+        setCaptured((n) => n + 1)
+      }
 
       stable = 0
       previous = null
@@ -258,7 +264,17 @@ export function SpineScanner({
     setAttempt((n) => n + 1)
   }, [])
 
-  const status = describeStatus({ ready, preparing, busy, ocrPending, advice, lastOutcome })
+  const status = describeSpineStatus({
+    ready,
+    preparing,
+    busy,
+    ocrPending,
+    lookupPending,
+    captured,
+    advice,
+    lastOutcome,
+  })
+  const closeHint = describeCloseHint({ ocrPending, lookupPending, captured })
   const error = cameraError ?? ocrError
 
   return (
@@ -332,6 +348,16 @@ export function SpineScanner({
       </div>
 
       {/*
+        押していいのかを、押す場所のすぐ下で答える。
+        撮った瞬間と読み終わる瞬間がずれるので、これが無いと終えどきが判らない
+      */}
+      {!cameraError && closeHint && (
+        <p className="note" role="status">
+          {closeHint}
+        </p>
+      )}
+
+      {/*
         読んだ端から書名が入っていく。ボタンを押さないと結果が出ないのでは
         「読めたのかどうか」が分からず、同じ棚を何度も撮ることになる
       */}
@@ -367,74 +393,4 @@ export function SpineScanner({
       </p>
     </div>
   )
-}
-
-interface StatusView {
-  kind: 'idle' | 'searching' | 'success' | 'duplicate'
-  label: string
-  detail?: string
-}
-
-/**
- * 現在の状態。色ではなく文で伝える。
- * 見せる順は「使えない理由 → 待たせている理由 → 進んでいること」。
- */
-function describeStatus(input: {
-  ready: boolean
-  preparing: boolean
-  busy: boolean
-  ocrPending: number
-  advice: string | null
-  lastOutcome: CaptureOutcome | null
-}): StatusView {
-  if (!input.ready) {
-    return {
-      kind: 'idle',
-      label: 'カメラを起動しています',
-      detail: 'カメラの利用を許可してください。',
-    }
-  }
-  if (input.preparing) {
-    return {
-      kind: 'idle',
-      label: '文字の読み取りを準備しています',
-      detail: '初回は読み込みに少し時間がかかります。そのままお待ちください。',
-    }
-  }
-  if (input.busy) {
-    return {
-      kind: 'idle',
-      label: '読み取りが追いついていません',
-      detail: '読み取りが終わるまでお待ちください。撮ったぶんは順に処理します。',
-    }
-  }
-  if (input.advice) {
-    return { kind: 'idle', label: '読み取れる状態ではありません', detail: input.advice }
-  }
-  if (input.lastOutcome === 'queued') {
-    return {
-      kind: 'success',
-      label: '棚を1枚取り込みました',
-      detail: '文字を読み取って書誌情報を調べています。次の段へ移してください。',
-    }
-  }
-  if (input.lastOutcome === 'duplicate') {
-    return {
-      kind: 'duplicate',
-      label: 'この構図は取り込み済みです',
-      detail: '次の段へ移すか、棚に沿って少しずらしてください。',
-    }
-  }
-  if (input.ocrPending > 0) {
-    return {
-      kind: 'searching',
-      label: '読み取っています',
-      detail: '次の段へ移して構いません。撮ったぶんは順に処理します。',
-    }
-  }
-  return {
-    kind: 'searching',
-    label: '棚を探しています',
-    detail: '棚の一段を枠に収めて、少し止めてください。',
-  }
 }

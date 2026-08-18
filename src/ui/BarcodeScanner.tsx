@@ -8,6 +8,7 @@ import {
   type BarcodeReader,
 } from '../lib/barcode'
 import { Notice } from './Notice'
+import { signalHit } from './feedback'
 
 /** 1冊ぶんの照合状況。スキャナはこれを表示するだけで、照合自体は関与しない */
 export interface ScanResult {
@@ -44,15 +45,6 @@ const SCAN_INTERVAL_MS = 140
 
 /** 読み取り結果を状態表示に残す時間。過ぎたら「探索中」に戻す */
 const RESULT_HOLD_MS = 2500
-
-/** 読み取り成功の合図を出す。端末が対応していないものは黙って飛ばす */
-function signalHit(): void {
-  try {
-    navigator.vibrate?.(60)
-  } catch {
-    /* iOS は未対応。無視してよい */
-  }
-}
 
 /** 状態表示の内容。色ではなく文章で状態を伝える */
 interface StatusView {

@@ -84,6 +84,8 @@ export function App() {
   const [rescueEntryId, setRescueEntryId] = useState<string | null>(null)
   /** 一覧を「手を入れる必要がある行」だけに絞るか */
   const [onlyAttention, setOnlyAttention] = useState(false)
+  /** 読み取りと照合がすべて終わったか。書誌一覧の中で伝える */
+  const [finished, setFinished] = useState(false)
   const [confirmingBulk, setConfirmingBulk] = useState(false)
   const online = useOnline()
 
@@ -262,6 +264,31 @@ export function App() {
   )
 
   const spineScan = useSpineScan({ active: inputMode === 'spine' && scanning, onSpine })
+
+  /** 読み取りと照合を合わせた残り。終わったことを伝えるのに使う */
+  const totalPending = pending + spineScan.state.pending
+  const hadPendingRef = useRef(false)
+
+  /*
+   * すべて終わったことを伝える。
+   *
+   * カメラを閉じても処理は続くので、黙って終わると「終わったのか、
+   * 途中で止まったのか」が判らない。
+   *
+   * 画面上部の flash ではなく書誌一覧の中に出す。カメラを閉じた利用者は
+   * 一覧を見に来ているので、上部に出しても視界に入らない。
+   * 読み取り中は出さない(1枚ごとに出ると、次の棚へ動かしている最中に点滅する)。
+   */
+  useEffect(() => {
+    if (totalPending > 0) {
+      hadPendingRef.current = true
+      setFinished(false)
+      return
+    }
+    if (!hadPendingRef.current || scanning) return
+    hadPendingRef.current = false
+    setFinished(true)
+  }, [totalPending, scanning])
 
   /** ISBN ごとの照合状況。バーコード画面の表示用 */
   const scanResults = useMemo(() => {
@@ -460,12 +487,23 @@ export function App() {
   const startScanning = useCallback(() => {
     setSessionId(newId())
     setRescueEntryId(null)
+    setFinished(false)
     setScanning(true)
   }, [])
 
   const stopScanning = useCallback(() => {
     setScanning(false)
     setRescueEntryId(null)
+    /*
+     * 閉じたあとに何が起きているかは一覧側に出る。そこへ送る。
+     * カメラを閉じても読み取りと照合は続くので、上に取り残されると
+     * 「終わったのか、止めてしまったのか」が判らない。
+     */
+    if (entriesRef.current.length > 0) {
+      requestAnimationFrame(() =>
+        document.getElementById('library')?.scrollIntoView({ block: 'start' }),
+      )
+    }
   }, [])
 
   /** 書誌一覧へ移動する。画面は1枚なので見出しへスクロールさせる */
@@ -625,14 +663,22 @@ export function App() {
             <h2 className="section-title">書誌一覧</h2>
 
             <div className="stack">
-              {(pending > 0 || spineScan.state.pending > 0) && (
+              {totalPending > 0 && (
                 <p className="scanner-status" role="status">
                   <span className="scanner-status__label">読み取った本を調べています</span>
                   <span className="scanner-status__detail">
-                    {spineScan.state.pending > 0 && `文字の読み取り待ち ${spineScan.state.pending} 件　`}
-                    {pending > 0 && `書誌情報の取得待ち ${pending} 件`}
+                    {spineScan.state.pending > 0 &&
+                      `棚の写真 ${spineScan.state.pending} 枚を読み取っています。`}
+                    {pending > 0 && `書誌情報の取得待ち ${pending} 件。`}
+                    カメラを閉じても最後まで続きます。
                   </span>
                 </p>
+              )}
+
+              {finished && (
+                <Notice kind="success" live="status">
+                  読み取りと書誌情報の取得が終わりました。
+                </Notice>
               )}
 
               {unresolved.length > 0 && pending === 0 && (
