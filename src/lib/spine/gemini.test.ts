@@ -30,8 +30,9 @@ describe('extractedSpinesFromGemini', () => {
       authors: ['外山滋比古'],
       publisher: 'ちくま文庫',
       engine: 'remoteVision',
-      box: { x: 0.1, y: 0.01, width: 0.14, height: 0.98 },
+      box: { x: 0.1, y: 0.01, height: 0.98 },
     })
+    expect(spines[0].box?.width).toBeCloseTo(0.14)
     expect(spines[1].fragments?.map((fragment) => fragment.text)).toEqual([
       '吾輩は猫である',
       '夏目漱石',
@@ -65,8 +66,9 @@ describe('extractedSpinesFromGemini', () => {
       title: '文化政策の現在',
       authors: [],
       confidence: 1,
-      box: { x: 0.05, y: 0, width: 0.15, height: 1 },
+      box: { x: 0.05, y: 0, height: 1 },
     })
+    expect(spines[0].box?.width).toBeCloseTo(0.15)
   })
 
   it('想定外の応答は空配列にする', () => {
