@@ -108,6 +108,20 @@ export function clearEntries(): Promise<void> {
   })
 }
 
+/**
+ * 蔵書データを丸ごと消す。
+ *
+ * 背表紙経路では、読み取ったクロップを photos に残している。
+ * entries だけ消すと画像が端末に残り続けるので、必ず両方を消す。
+ * 「すべて削除する」と書いてある以上、消え残りがあってはならない。
+ */
+export async function clearAll(): Promise<void> {
+  await clearEntries()
+  await withStore(STORE_PHOTOS, 'readwrite', async (s) => {
+    await promisify(s.clear())
+  })
+}
+
 // ── プロジェクト ──────────────────────────────────────
 
 export function saveProject(project: Project): Promise<void> {

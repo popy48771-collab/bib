@@ -19,6 +19,14 @@ export interface ScanResult {
 interface Props {
   /** 既に一覧に入っている ISBN。重複スキャンを検知するために渡す */
   knownIsbns: ReadonlySet<string>
+  /**
+   * 1冊読んだら終える。
+   *
+   * 背表紙で読めなかった本を、既存の行に結び付けて確定させるときに使う。
+   * この場合は「既に一覧にある ISBN」でも受け取る。同じ本を2冊持っている
+   * ことも、直前に読んだ本を読み直していることもあるため。
+   */
+  oneShot?: boolean
   /** ISBN ごとの照合状況。読み取った順に下へ表示する */
   results: ReadonlyMap<string, ScanResult>
   /** 一覧に登録済みの冊数。画面の末尾に出す */
@@ -75,6 +83,7 @@ const RESULT_TEXT: Record<ScanResult['state'], string> = {
  */
 export function BarcodeScanner({
   knownIsbns,
+  oneShot = false,
   results,
   registeredCount,
   onIsbn,
@@ -102,13 +111,23 @@ export function BarcodeScanner({
    * これを走査の useEffect の依存に入れると、読み取るたびにカメラが
    * 開き直されてしまうので、値は ref 経由で渡す。
    */
-  const liveRef = useRef({ knownIsbns, onIsbn })
+  const liveRef = useRef({ knownIsbns, oneShot, onIsbn, onClose })
   useEffect(() => {
-    liveRef.current = { knownIsbns, onIsbn }
+    liveRef.current = { knownIsbns, oneShot, onIsbn, onClose }
   })
 
   const handleCode = useCallback((isbn: string) => {
-    const { knownIsbns, onIsbn } = liveRef.current
+    const { knownIsbns, oneShot, onIsbn, onClose } = liveRef.current
+
+    // 既存の行へ結び付ける読み取りは、重複判定を通さずに1冊で終える
+    if (oneShot) {
+      signalHit()
+      setLastRead({ isbn, dup: false })
+      onIsbn(isbn)
+      onClose()
+      return
+    }
+
     const dup = scannedRef.current.has(isbn) || knownIsbns.has(isbn)
     if (!dup) {
       scannedRef.current.add(isbn)
@@ -257,7 +276,7 @@ export function BarcodeScanner({
           </>
         ) : (
           <button type="button" className="button button--primary button--block" onClick={onClose}>
-            読み取りを終える
+            {oneShot ? '読み取りをやめる' : '読み取りを終える'}
           </button>
         )}
       </div>

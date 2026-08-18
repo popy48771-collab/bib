@@ -1,10 +1,21 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { BookEntry, ScoredCandidate } from './types'
-import { adoptCandidate, entriesFromIsbns, resolveEntries, resolveEntry } from './pipeline/stages'
-import { clearEntries, deleteEntry, forgetLegacySettings, listEntries, saveEntries } from './lib/db'
+import type { BookEntry, ExtractedSpine, ScoredCandidate } from './types'
+import { adoptCandidate, entriesFromExtraction, entriesFromIsbns, resolveEntries, resolveEntry } from './pipeline/stages'
+import { spineFromText, spineRawText } from './lib/spine/parse'
+import {
+  clearAll,
+  deleteEntry,
+  deletePhoto,
+  forgetLegacySettings,
+  listEntries,
+  savePhoto,
+  saveEntries,
+} from './lib/db'
 import { BookList } from './ui/BookList'
 import { ExportPanel } from './ui/ExportPanel'
 import { BarcodeScanner, type ScanResult } from './ui/BarcodeScanner'
+import { SpineScanner, type SpineResult } from './ui/SpineScanner'
+import { useSpineScan, type SpineCrop } from './ui/useSpineScan'
 import { Notice, type NoticeKind } from './ui/Notice'
 import { useOnline } from './ui/useOnline'
 
@@ -35,18 +46,34 @@ function settle(entry: BookEntry): BookEntry {
   return { ...entry, status: 'notFound' }
 }
 
+/** 読み取り方式ごとの見出しと説明 */
+const MODE_TEXT: Record<InputMode, { title: string; lead: string }> = {
+  barcode: {
+    title: '本のバーコードを読み取る',
+    lead: '裏表紙の、978または979から始まるバーコードをカメラに収めてください。読み取った本から順に書誌情報を調べ、下の一覧に並べます。',
+  },
+  spine: {
+    title: '本棚の背表紙を読み取る',
+    lead: 'カメラを横向きにして本棚にかざし、棚に沿ってゆっくり動かしてください。画面中央の枠を通った背表紙から順に文字を読み取り、書誌情報を調べて下の一覧に並べます。',
+  },
+}
+
 export function App() {
   const [entries, setEntries] = useState<BookEntry[]>([])
   const [error, setError] = useState<string | null>(null)
   /** 操作の結果。取得や削除の完了を伝える */
   const [flash, setFlash] = useState<{ kind: NoticeKind; message: string } | null>(null)
-  // 既定はバーコード。APIキーが要らず課金も発生しないので、初見でも必ず動く
+  // 既定はバーコード。読み取りが確実で、OCR の資産を取りに行かずに済む
   const [inputMode, setInputMode] = useState<InputMode>('barcode')
   const [scanning, setScanning] = useState(false)
+  /** 1回のカメラ起動。スキャナ画面が「この読み取りで追加した本」を出すのに使う */
+  const [sessionId, setSessionId] = useState('')
   /** 照合待ちの件数。走査は止めずに裏で進むので、進み具合だけ見せる */
   const [pending, setPending] = useState(0)
   const [retrying, setRetrying] = useState(false)
   const [confirmingClear, setConfirmingClear] = useState(false)
+  /** バーコードで確定させようとしている行。新しい行は増やさない */
+  const [rescueEntryId, setRescueEntryId] = useState<string | null>(null)
   const online = useOnline()
 
   /**
@@ -89,24 +116,22 @@ export function App() {
   }, [])
 
   /**
-   * バーコードを1冊読んだときの処理。
+   * 1冊を書誌照合の待ち行列へ積む。
    *
-   * まず ISBN だけの行を出し、書誌照合は裏で走らせる。
+   * バーコードも背表紙も、行を先に一覧へ出して照合は裏で進める。
    * 「読めた」ことが即座に見えないと、同じ本を何度もかざすことになる。
+   * 照合は直列で流す。同時に何本も投げると Google Books に絞られる。
    */
-  const onIsbn = useCallback(
-    (isbn: string) => {
-      const entry = entriesFromIsbns([isbn], `scan-${newId()}`)[0]
-      upsertEntry(entry)
+  const enqueueResolve = useCallback(
+    (entryId: string) => {
       setPending((n) => n + 1)
-
       queueRef.current = queueRef.current
         .then(async () => {
           // 照合を待つ間に消去・除外されているかもしれないので取り直す
-          const current = entriesRef.current.find((e) => e.id === entry.id)
+          const current = entriesRef.current.find((e) => e.id === entryId)
           if (!current) return
           const resolved = settle(await resolveEntry(current))
-          if (entriesRef.current.some((e) => e.id === entry.id)) upsertEntry(resolved)
+          if (entriesRef.current.some((e) => e.id === entryId)) upsertEntry(resolved)
         })
         .catch(() =>
           setError(
@@ -118,7 +143,104 @@ export function App() {
     [upsertEntry],
   )
 
-  /** ISBN ごとの照合状況。スキャナの表示用 */
+  /**
+   * バーコードを1冊読んだときの処理。
+   *
+   * 救済中(背表紙で読めなかった行にバーコードを結び付ける)なら、
+   * 新しい行を作らずその行へ ISBN を入れて引き直す。
+   */
+  const onIsbn = useCallback(
+    (isbn: string) => {
+      if (rescueEntryId) {
+        const target = entriesRef.current.find((e) => e.id === rescueEntryId)
+        setRescueEntryId(null)
+        if (!target) return
+        upsertEntry({
+          ...target,
+          // 読み取ったクロップと OCR の文字は残す。どの本を撮ったかの記録なので
+          resolved: { title: '', authors: [], isbn13: isbn, source: 'barcode' },
+          provenance: { isbn13: 'barcode' },
+          // 書名検索で出た候補は別の本のものかもしれない。利用者が
+          // 「この本のバーコードはこれ」と言った以上、当てにしない
+          candidates: {},
+          conflicts: undefined,
+          status: 'unverified',
+          pinned: false,
+        })
+        enqueueResolve(target.id)
+        setFlash({ kind: 'info', message: 'ISBNを読み取りました。書誌情報を取得しています。' })
+        return
+      }
+
+      const entry = entriesFromIsbns([isbn], `scan-${newId()}`)[0]
+      upsertEntry({ ...entry, scanSessionId: sessionId })
+      enqueueResolve(entry.id)
+    },
+    [enqueueResolve, rescueEntryId, sessionId, upsertEntry],
+  )
+
+  /**
+   * 背表紙を1冊読んだときの処理。
+   *
+   * sameAs が入っているときは、直前に読んだのと同じ背表紙である。
+   * 行を増やさず、読みが良くなったときだけ差し替える。
+   */
+  const onSpine = useCallback(
+    (spine: ExtractedSpine, crop: SpineCrop, sameAs?: string): string | null => {
+      const existing = sameAs ? entriesRef.current.find((e) => e.id === sameAs) : undefined
+      if (existing) {
+        const observed: BookEntry = {
+          ...existing,
+          observationCount: (existing.observationCount ?? 1) + 1,
+        }
+        // 確定済み・手動確定・除外には自動処理で触らない
+        const touchable =
+          !existing.pinned && existing.status !== 'confirmed' && existing.status !== 'excluded'
+        const better = spine.confidence > (existing.extractConfidence ?? 0)
+
+        if (touchable && better) {
+          upsertEntry({
+            ...observed,
+            rawText: spineRawText(spine),
+            extracted: { title: spine.title, authors: spine.authors, publisher: spine.publisher },
+            extractConfidence: spine.confidence,
+          })
+          enqueueResolve(existing.id)
+        } else {
+          upsertEntry(observed)
+        }
+        return existing.id
+      }
+
+      const photoId = `spine-${newId()}`
+      const created = entriesFromExtraction(photoId, [spine], photoId)[0]
+      const entry: BookEntry = {
+        ...created,
+        scanSessionId: sessionId,
+        visualHash: crop.hash,
+        observationCount: 1,
+      }
+      upsertEntry(entry)
+
+      // 画像は候補を選ぶときの手掛かりとして残す。
+      // 容量不足などで保存できなくても、書誌一覧の作成は止めない
+      savePhoto({
+        id: photoId,
+        blob: crop.blob,
+        width: crop.width,
+        height: crop.height,
+        createdAt: crop.at,
+      }).catch(() => undefined)
+
+      enqueueResolve(entry.id)
+      return entry.id
+    },
+    [enqueueResolve, sessionId, upsertEntry],
+  )
+
+  const spineScan = useSpineScan({ active: inputMode === 'spine' && scanning, onSpine })
+
+  /** ISBN ごとの照合状況。バーコード画面の表示用 */
   const scanResults = useMemo(() => {
     const map = new Map<string, ScanResult>()
     for (const e of entries) {
@@ -132,6 +254,26 @@ export function App() {
     }
     return map
   }, [entries])
+
+  /** この読み取りで追加した背表紙。スキャナ画面のフィード用 */
+  const spineResults = useMemo<SpineResult[]>(
+    () =>
+      entries
+        .filter((e) => e.inputKind === 'spine' && e.scanSessionId === sessionId)
+        .map((e) => ({
+          id: e.id,
+          title: e.resolved?.title || e.extracted.title || '(読み取り中)',
+          state:
+            e.status === 'confirmed'
+              ? 'found'
+              : e.status === 'notFound'
+                ? 'missing'
+                : e.status === 'unverified'
+                  ? 'looking'
+                  : 'review',
+        })),
+    [entries, sessionId],
+  )
 
   const knownIsbns = useMemo(() => new Set(scanResults.keys()), [scanResults])
   const unresolved = useMemo(() => entries.filter(isUnresolved), [entries])
@@ -151,7 +293,7 @@ export function App() {
           ? { kind: 'success', message: `${done.length} 件の書誌情報を取得しました。` }
           : {
               kind: 'info',
-              message: `${done.length} 件のうち ${still} 件は書誌情報が見つかりませんでした。ISBNを確認して、もう一度読み取ってください。`,
+              message: `${done.length} 件のうち ${still} 件は書誌情報が見つかりませんでした。読み取った内容を確認してください。`,
             },
       )
     } catch {
@@ -185,6 +327,50 @@ export function App() {
     [patchEntry],
   )
 
+  /**
+   * 読み取った文字を直して引き直す。
+   *
+   * 直した内容は「印刷されている文字」であって書誌ではないので、
+   * これだけでは確定させない(pinned にしない)。書誌DBで実在確認を取り直す。
+   */
+  const onEditText = useCallback(
+    (entryId: string, text: string) => {
+      const spine = spineFromText(text)
+      patchEntry(entryId, (e) => ({
+        ...e,
+        rawText: spine ? spineRawText(spine) : text,
+        extracted: {
+          title: spine?.title ?? text.trim(),
+          authors: spine?.authors ?? [],
+          publisher: spine?.publisher,
+        },
+        extractConfidence: 1,
+        // 前の読みで出た候補は別の本のものかもしれないので持ち越さない
+        candidates: {},
+        resolved: undefined,
+        provenance: {},
+        conflicts: undefined,
+        status: 'unverified',
+      }))
+      enqueueResolve(entryId)
+    },
+    [enqueueResolve, patchEntry],
+  )
+
+  /** バーコードで確定させる。カメラをバーコードに切り替えて1冊だけ読む */
+  const onRescue = useCallback((entryId: string) => {
+    setRescueEntryId(entryId)
+    setInputMode('barcode')
+    setScanning(true)
+    setFlash(null)
+    document.getElementById('scanner')?.scrollIntoView({ block: 'start' })
+  }, [])
+
+  const onCancelRescue = useCallback(() => {
+    setRescueEntryId(null)
+    setScanning(false)
+  }, [])
+
   const onExclude = useCallback(
     (entryId: string) => patchEntry(entryId, (e) => ({ ...e, status: 'excluded' })),
     [patchEntry],
@@ -199,19 +385,22 @@ export function App() {
   /**
    * 1件を削除する。
    * state から外すだけでは次回起動時に IndexedDB から復活するので、
-   * 保存側からも消す。
+   * 保存側からも消す。背表紙のクロップも一緒に消す（画像を端末に残さない）。
    */
   const onDelete = useCallback((entryId: string) => {
+    const target = entriesRef.current.find((e) => e.id === entryId)
     entriesRef.current = entriesRef.current.filter((e) => e.id !== entryId)
     setEntries(entriesRef.current)
     deleteEntry(entryId).catch(() =>
       setError('削除した内容を保存できませんでした。もう一度お試しください。'),
     )
+    if (target?.inputKind === 'spine') deletePhoto(target.photoId).catch(() => undefined)
     setFlash({ kind: 'success', message: '1 件を一覧から削除しました。' })
   }, [])
 
   const onReset = useCallback(() => {
-    clearEntries().catch(() => undefined)
+    // 背表紙のクロップも一緒に消す。entries だけ消すと画像が端末に残る
+    clearAll().catch(() => undefined)
     entriesRef.current = []
     setEntries([])
     setError(null)
@@ -219,10 +408,24 @@ export function App() {
     setFlash({ kind: 'success', message: '保存されていた蔵書データをすべて削除しました。' })
   }, [])
 
+  /** 読み取りを始める。1回ぶんの通し番号を振る */
+  const startScanning = useCallback(() => {
+    setSessionId(newId())
+    setRescueEntryId(null)
+    setScanning(true)
+  }, [])
+
+  const stopScanning = useCallback(() => {
+    setScanning(false)
+    setRescueEntryId(null)
+  }, [])
+
   /** 書誌一覧へ移動する。画面は1枚なので見出しへスクロールさせる */
   const goToLibrary = useCallback(() => {
     document.getElementById('library')?.scrollIntoView({ block: 'start' })
   }, [])
+
+  const rescuing = rescueEntryId !== null
 
   return (
     <div className="app">
@@ -236,20 +439,20 @@ export function App() {
       <main className="main container">
         <div className="stack">
           {/* 1. 見出し / 2. 短い説明。以降はスキャナ側が続ける */}
-          <div>
+          <div id="scanner">
             <h1 className="page-title">
-              {inputMode === 'barcode' ? '本のバーコードを読み取る' : '背表紙から読み取る'}
+              {rescuing ? 'バーコードで確定する' : MODE_TEXT[inputMode].title}
             </h1>
             <p className="page-lead">
-              {inputMode === 'barcode'
-                ? '裏表紙の、978または979から始まるバーコードをカメラに収めてください。読み取った本から順に書誌情報を調べ、下の一覧に並べます。'
-                : '本棚にカメラをかざして背表紙から読み取る方式は準備中です。'}
+              {rescuing
+                ? '背表紙から書誌情報を特定できなかった本です。裏表紙のバーコードをカメラに収めてください。1冊読み取ると元の画面に戻ります。'
+                : MODE_TEXT[inputMode].lead}
             </p>
           </div>
 
           {!online && (
             <Notice kind="error" title="オフライン" live="status">
-              ネットワークに接続されていません。バーコードの読み取りはこのまま使えますが、書誌情報の取得は接続後に実行してください。
+              ネットワークに接続されていません。読み取りはこのまま使えますが、書誌情報の取得は接続後に実行してください。
             </Notice>
           )}
 
@@ -265,55 +468,68 @@ export function App() {
             </Notice>
           )}
 
-          {inputMode === 'barcode' ? (
-            scanning ? (
+          {scanning ? (
+            inputMode === 'barcode' ? (
               <BarcodeScanner
                 knownIsbns={knownIsbns}
+                oneShot={rescuing}
                 results={scanResults}
                 registeredCount={entries.length}
                 onIsbn={onIsbn}
-                onClose={() => setScanning(false)}
+                onClose={stopScanning}
                 onOpenLibrary={goToLibrary}
               />
             ) : (
-              /* 3〜6. カメラ表示領域 → 現在の状態 → 主操作 → 登録済み件数と一覧へのリンク */
-              <div className="stack">
-                <div className="scanner-view">
-                  <p className="scanner-placeholder">カメラは停止しています</p>
-                </div>
-
-                <p className="scanner-status" role="status">
-                  <span className="scanner-status__label">カメラは停止しています</span>
-                  <span className="scanner-status__detail">
-                    「カメラを開始」を押すと読み取りを始めます。カメラは HTTPS でのみ利用できます。
-                  </span>
-                </p>
-
-                <div className="actions">
-                  <button
-                    type="button"
-                    className="button button--primary button--block"
-                    onClick={() => setScanning(true)}
-                  >
-                    カメラを開始
-                  </button>
-                </div>
-
-                <p className="note">
-                  登録済み: {entries.length} 件{' '}
-                  <button type="button" className="button button--compact" onClick={goToLibrary}>
-                    書誌一覧へ移動
-                  </button>
-                </p>
-              </div>
+              <SpineScanner
+                preparing={spineScan.state.preparing}
+                ocrError={spineScan.state.error}
+                ocrPending={spineScan.state.pending}
+                lookupPending={pending}
+                busy={spineScan.state.busy}
+                unreadable={spineScan.state.unreadable}
+                results={spineResults}
+                registeredCount={entries.length}
+                onCapture={spineScan.capture}
+                onClose={stopScanning}
+                onOpenLibrary={goToLibrary}
+              />
             )
           ) : (
-            <p className="note">いまはバーコードをお使いください。</p>
+            /* 3〜6. カメラ表示領域 → 現在の状態 → 主操作 → 登録済み件数と一覧へのリンク */
+            <div className="stack">
+              <div className="scanner-view">
+                <p className="scanner-placeholder">カメラは停止しています</p>
+              </div>
+
+              <p className="scanner-status" role="status">
+                <span className="scanner-status__label">カメラは停止しています</span>
+                <span className="scanner-status__detail">
+                  「カメラを開始」を押すと読み取りを始めます。カメラは HTTPS でのみ利用できます。
+                </span>
+              </p>
+
+              <div className="actions">
+                <button
+                  type="button"
+                  className="button button--primary button--block"
+                  onClick={startScanning}
+                >
+                  カメラを開始
+                </button>
+              </div>
+
+              <p className="note">
+                登録済み: {entries.length} 件{' '}
+                <button type="button" className="button button--compact" onClick={goToLibrary}>
+                  書誌一覧へ移動
+                </button>
+              </p>
+            </div>
           )}
 
           {/*
             読み取り方式の切り替え。
-            バーコードは1冊ずつ手に取る必要があるが課金ゼロで確実に読める。
+            バーコードは1冊ずつ手に取る必要があるが確実に読める。
             背表紙は棚にかざすだけで済むが、読み取りが曖昧で照合の当たり外れがある。
             どちらが良いかは状況で変わるので、利用者に選ばせる。
           */}
@@ -325,12 +541,12 @@ export function App() {
                   {
                     id: 'barcode' as const,
                     title: 'バーコード',
-                    note: 'かざすだけで1冊ずつ読み取ります。APIキーは不要で、費用もかかりません。',
+                    note: 'かざすだけで1冊ずつ読み取ります。ISBNで完全に一致するため、書誌情報は確実です。',
                   },
                   {
                     id: 'spine' as const,
                     title: '本棚の背表紙',
-                    note: '棚ごと読み取ります。準備中です。',
+                    note: '棚にかざして流すだけで読み取ります。本を手に取る必要はありませんが、読み取れない本や、候補の確認が必要な本が出ます。',
                   },
                 ] satisfies { id: InputMode; title: string; note: string }[]
               ).map((m) => (
@@ -341,6 +557,7 @@ export function App() {
                       name="input-mode"
                       value={m.id}
                       checked={inputMode === m.id}
+                      disabled={rescuing}
                       onChange={() => {
                         setInputMode(m.id)
                         setScanning(false)
@@ -360,10 +577,13 @@ export function App() {
             <h2 className="section-title">書誌一覧</h2>
 
             <div className="stack">
-              {pending > 0 && (
+              {(pending > 0 || spineScan.state.pending > 0) && (
                 <p className="scanner-status" role="status">
-                  <span className="scanner-status__label">書誌情報を取得しています</span>
-                  <span className="scanner-status__detail">残り {pending} 件</span>
+                  <span className="scanner-status__label">読み取った本を調べています</span>
+                  <span className="scanner-status__detail">
+                    {spineScan.state.pending > 0 && `文字の読み取り待ち ${spineScan.state.pending} 件　`}
+                    {pending > 0 && `書誌情報の取得待ち ${pending} 件`}
+                  </span>
                 </p>
               )}
 
@@ -393,6 +613,10 @@ export function App() {
                 onExclude={onExclude}
                 onRestore={onRestore}
                 onDelete={onDelete}
+                onEditText={onEditText}
+                onRescue={onRescue}
+                rescuingId={rescueEntryId}
+                onCancelRescue={onCancelRescue}
               />
             </div>
           </section>
@@ -410,7 +634,7 @@ export function App() {
                   <div className="confirm" role="group" aria-label="全件削除の確認">
                     <p>
                       この端末に保存されている蔵書データ {entries.length}{' '}
-                      件をすべて削除します。削除すると元に戻せません。必要な場合は先に書き出してください。
+                      件と、読み取った背表紙の画像をすべて削除します。削除すると元に戻せません。必要な場合は先に書き出してください。
                     </p>
                     <div className="actions">
                       <button type="button" className="button button--danger" onClick={onReset}>
@@ -443,6 +667,7 @@ export function App() {
       <footer className="site-footer">
         <div className="container">
           <p>書誌情報：国立国会図書館サーチ、openBD、Google Books</p>
+          <p>文字の読み取り：Tesseract（端末内で処理し、画像は送信しません）</p>
           <ul>
             <li>
               <a href="https://github.com/popy48771-collab/bib#readme">利用上の注意</a>
@@ -452,7 +677,7 @@ export function App() {
             </li>
           </ul>
           <p>
-            読み取った蔵書データは、すべて利用者の端末内に保存されます。当サイトの提供者へ送信されることはありません。
+            読み取った蔵書データと背表紙の画像は、すべて利用者の端末内に保存されます。当サイトの提供者へ送信されることはありません。
           </p>
           <p>
             このサイトは個人が作成したもので、国立国会図書館の公式サービスではありません。行政機関が提供するサービスでもありません。

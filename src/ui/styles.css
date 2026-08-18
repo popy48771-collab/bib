@@ -764,6 +764,46 @@ textarea::placeholder {
   pointer-events: none;
 }
 
+/*
+ * 背表紙のカメラ表示。
+ *
+ * バーコードは 4/3 に切って object-fit: cover で埋めているが、背表紙では
+ * 読取レーンの枠と実際に切り出す範囲が一致していなければならない。
+ * 埋めると映像の左右が隠れ、「枠に入れたのに読まれない」ことが起きる。
+ * 映像の縦横比のまま出し、枠を映像の座標へ直接載せる。
+ */
+.scanner-view--spine {
+  aspect-ratio: auto;
+  min-height: 12rem;
+}
+
+.scanner-view--spine video {
+  height: auto;
+  object-fit: contain;
+}
+
+/*
+ * 中央の読取レーン。ここを通過した背表紙だけを取り込む。
+ * 値は lib/spine/capture.ts の LANE_WIDTH_RATIO / LANE_HEIGHT_RATIO と対にする
+ * （幅 18% → 左右 41%、高さ 92% → 上下 4%）。
+ */
+.scanner-lane {
+  position: absolute;
+  top: 4%;
+  bottom: 4%;
+  left: 41%;
+  right: 41%;
+  border-left: 2px solid var(--color-neutral-white);
+  border-right: 2px solid var(--color-neutral-white);
+  /*
+   * 白い線だけだと、白い紙のカバーに重なったときに枠が消える。
+   * 外側に黒の細線を添えて、明るい背表紙の上でも輪郭が残るようにする。
+   * （装飾の影ではなく、枠を見えるようにするための線）
+   */
+  box-shadow: 0 0 0 1px var(--color-neutral-black);
+  pointer-events: none;
+}
+
 /* カメラが映る前の面。映像が来れば隠れる */
 .scanner-placeholder {
   position: absolute;
@@ -855,6 +895,16 @@ textarea::placeholder {
   display: block;
   color: var(--color-text-weak);
   font-variant-numeric: tabular-nums;
+}
+
+/* 背表紙経路の状態説明。ISBN と違い数字ではないので等幅にしない */
+.scan-feed__detail {
+  display: block;
+  color: var(--color-text-weak);
+}
+
+.scan-feed li[data-state="review"] .scan-feed__title {
+  color: var(--color-text);
 }
 
 /* ── 書誌一覧（OPAC 風） ───────────────────────────── */
@@ -959,6 +1009,47 @@ textarea::placeholder {
   flex-wrap: wrap;
   gap: var(--space-2);
   margin-top: var(--space-3);
+}
+
+/*
+ * 読み取った背表紙そのもの。候補を選ぶときに、本棚を見に戻らなくて済むよう
+ * 元の画像を並べる。一覧の主役は書名なので、確認が要る行だけに出す。
+ */
+.crop {
+  margin: var(--space-3) 0 0;
+}
+
+.crop figcaption {
+  margin-bottom: var(--space-2);
+  font-size: var(--text-note);
+  line-height: 1.5;
+  color: var(--color-text-sub);
+}
+
+.crop img {
+  display: block;
+  max-width: 100%;
+  max-height: 160px;
+  border: 1px solid var(--color-divider);
+  border-radius: var(--radius-xs);
+}
+
+/* 読み取り文字の修正。行の中に留め、前面に浮かせない */
+.record__edit {
+  margin-top: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--color-divider);
+  border-radius: var(--radius);
+  background: var(--color-bg);
+}
+
+.record__edit .field {
+  margin: 0 0 var(--space-3);
+}
+
+.record__edit textarea {
+  background: var(--color-surface);
+  min-height: 6rem;
 }
 
 /* 削除確認。行の中に留め、前面に浮かせない */

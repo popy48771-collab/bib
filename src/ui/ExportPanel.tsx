@@ -8,14 +8,15 @@ interface Props {
 
 export function ExportPanel({ entries }: Props) {
   const [format, setFormat] = useState<ExportFormat>('csv')
-  const [includeUnverified, setIncludeUnverified] = useState(false)
+  const [includeUnconfirmed, setIncludeUnconfirmed] = useState(false)
   const [message, setMessage] = useState<string | null>(null)
 
   const content = useMemo(
-    () => renderExport(format, entries, includeUnverified),
-    [format, entries, includeUnverified],
+    () => renderExport(format, entries, includeUnconfirmed),
+    [format, entries, includeUnconfirmed],
   )
-  const count = exportableEntries(entries, includeUnverified).length
+  const count = exportableEntries(entries, includeUnconfirmed).length
+  const unconfirmed = exportableEntries(entries, true).length - exportableEntries(entries, false).length
 
   const download = () => {
     const meta = EXPORT_META[format]
@@ -76,16 +77,23 @@ export function ExportPanel({ entries }: Props) {
         </div>
       </div>
 
+      {/*
+        既定では確定したものだけを出す。背表紙から読み取ったものは
+        誤同定がありうるので、確認前のものを黙って蔵書リストへ混ぜない。
+      */}
       <label className="checkbox">
         <input
           type="checkbox"
-          checked={includeUnverified}
-          onChange={(e) => setIncludeUnverified(e.target.checked)}
+          checked={includeUnconfirmed}
+          onChange={(e) => setIncludeUnconfirmed(e.target.checked)}
         />
-        書誌情報を取得できなかったものも含める
+        確認が済んでいないもの（要確認・差分あり）も含める
       </label>
 
-      <p className="note">書き出す件数: {count} 件</p>
+      <p className="note">
+        書き出す件数: {count} 件
+        {!includeUnconfirmed && unconfirmed > 0 && `（確認が済んでいない ${unconfirmed} 件を除いています）`}
+      </p>
 
       {message && (
         <p className="note" role="status">

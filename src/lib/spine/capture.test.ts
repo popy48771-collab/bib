@@ -1,0 +1,194 @@
+import { describe, expect, it } from 'vitest'
+import {
+  MIN_BRIGHTNESS,
+  assessFrame,
+  blowoutRatio,
+  brightness,
+  downscale,
+  frameAdvice,
+  frameDifference,
+  hashDistance,
+  isUsable,
+  laneRect,
+  looksSame,
+  pickSharpest,
+  sharpness,
+  toGray,
+  visualHash,
+  type RgbaImage,
+} from './capture'
+
+/** 濃淡だけの画像を作る。RGB を同じ値にすれば輝度はそのまま v になる */
+function image(width: number, height: number, at: (x: number, y: number) => number): RgbaImage {
+  const data = new Uint8ClampedArray(width * height * 4)
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const v = at(x, y)
+      const i = (y * width + x) * 4
+      data[i] = v
+      data[i + 1] = v
+      data[i + 2] = v
+      data[i + 3] = 255
+    }
+  }
+  return { width, height, data }
+}
+
+const flat = (w: number, h: number, v: number) => toGray(image(w, h, () => v))
+const checker = (w: number, h: number) => toGray(image(w, h, (x, y) => ((x + y) % 2 ? 255 : 0)))
+/** 緩やかな階調。輪郭が鈍っている＝ブレた状態に相当する */
+const gradient = (w: number, h: number) => toGray(image(w, h, (x) => (x / w) * 255))
+
+describe('brightness', () => {
+  it('真っ黒は 0、真っ白は 1', () => {
+    expect(brightness(flat(8, 8, 0))).toBe(0)
+    expect(brightness(flat(8, 8, 255))).toBe(1)
+  })
+
+  it('中間の明るさはおよそ 0.5', () => {
+    expect(brightness(flat(8, 8, 128))).toBeCloseTo(0.5, 1)
+  })
+})
+
+describe('blowoutRatio', () => {
+  it('白飛びしていなければ 0', () => {
+    expect(blowoutRatio(flat(8, 8, 200))).toBe(0)
+  })
+
+  it('半分が白飛びなら 0.5', () => {
+    const g = toGray(image(8, 8, (x) => (x < 4 ? 255 : 100)))
+    expect(blowoutRatio(g)).toBeCloseTo(0.5, 5)
+  })
+
+  it('白い紙のカバーは白飛びとして数えない', () => {
+    // 白い背表紙は 250 前後まで上がる。ここを弾くと白い本がまるごと読めなくなる
+    const q = assessFrame(toGray(image(32, 32, (x, y) => ((x + y) % 4 < 1 ? 30 : 250))))
+    expect(q.blowout).toBe(0)
+    expect(isUsable(q)).toBe(true)
+  })
+})
+
+describe('sharpness', () => {
+  it('のっぺりした面は 0', () => {
+    expect(sharpness(flat(16, 16, 128))).toBe(0)
+  })
+
+  it('輪郭がはっきりしているほど大きい', () => {
+    expect(sharpness(checker(16, 16))).toBeGreaterThan(sharpness(gradient(16, 16)))
+  })
+
+  it('小さすぎる画像では判定しない', () => {
+    expect(sharpness(flat(2, 2, 128))).toBe(0)
+  })
+})
+
+describe('isUsable / frameAdvice', () => {
+  it('暗すぎるコマは取り込まず、明るさを直す案内を出す', () => {
+    const q = assessFrame(flat(16, 16, 10))
+    expect(q.brightness).toBeLessThan(MIN_BRIGHTNESS)
+    expect(isUsable(q)).toBe(false)
+    expect(frameAdvice(q)).toContain('暗')
+  })
+
+  it('白飛びしているコマは反射を避ける案内を出す', () => {
+    const q = assessFrame(checker(16, 16))
+    expect(isUsable(q)).toBe(false)
+    expect(frameAdvice(q)).toContain('反射')
+  })
+
+  it('のっぺりした面はブレとして扱い、動かす速さの案内を出す', () => {
+    const q = assessFrame(flat(16, 16, 128))
+    expect(isUsable(q)).toBe(false)
+    expect(frameAdvice(q)).toContain('ぼやけて')
+  })
+
+  it('明るさも輪郭も足りていれば取り込む', () => {
+    // 文字のような細かい濃淡があり、白飛びしていない画像
+    const g = toGray(image(32, 32, (x, y) => ((x + y) % 4 < 2 ? 60 : 200)))
+    const q = assessFrame(g)
+    expect(isUsable(q)).toBe(true)
+    expect(frameAdvice(q)).toBeNull()
+  })
+})
+
+describe('frameDifference', () => {
+  it('同じコマなら 0', () => {
+    expect(frameDifference(gradient(8, 8), gradient(8, 8))).toBe(0)
+  })
+
+  it('黒と白なら 1', () => {
+    expect(frameDifference(flat(8, 8, 0), flat(8, 8, 255))).toBe(1)
+  })
+
+  it('寸法が違うものは比較できないので「まったく別」とする', () => {
+    expect(frameDifference(flat(8, 8, 0), flat(4, 4, 0))).toBe(1)
+  })
+})
+
+describe('visualHash', () => {
+  it('16桁の16進で返る', () => {
+    expect(visualHash(gradient(32, 32))).toMatch(/^[0-9a-f]{16}$/)
+  })
+
+  it('同じ絵なら距離 0', () => {
+    expect(hashDistance(visualHash(gradient(32, 32)), visualHash(gradient(32, 32)))).toBe(0)
+  })
+
+  it('別の絵は距離が開く', () => {
+    const a = visualHash(toGray(image(32, 32, (x) => (x < 16 ? 0 : 255))))
+    const b = visualHash(toGray(image(32, 32, (x) => (x < 16 ? 255 : 0))))
+    expect(hashDistance(a, b)).toBeGreaterThan(8)
+    expect(looksSame(a, b)).toBe(false)
+  })
+
+  it('片方が無ければ同一とはみなさない', () => {
+    expect(looksSame(undefined, 'ffffffffffffffff')).toBe(false)
+  })
+
+  it('わずかな濃淡の違いは同じ背表紙として扱う', () => {
+    const a = visualHash(toGray(image(32, 32, (x) => (x < 16 ? 40 : 200))))
+    const b = visualHash(toGray(image(32, 32, (x) => (x < 16 ? 50 : 210))))
+    expect(looksSame(a, b)).toBe(true)
+  })
+})
+
+describe('pickSharpest', () => {
+  it('最も鮮鋭な1枚を選ぶ', () => {
+    const frames = [
+      { id: 'a', quality: assessFrame(gradient(16, 16)) },
+      { id: 'b', quality: assessFrame(checker(16, 16)) },
+      { id: 'c', quality: assessFrame(flat(16, 16, 128)) },
+    ]
+    expect(pickSharpest(frames)?.id).toBe('b')
+  })
+
+  it('1枚も無ければ null', () => {
+    expect(pickSharpest([])).toBeNull()
+  })
+})
+
+describe('laneRect', () => {
+  it('画面中央に縦長の帯を置く', () => {
+    const r = laneRect(1280, 720)
+    expect(r.width).toBe(Math.round(1280 * 0.18))
+    expect(r.height).toBe(Math.round(720 * 0.92))
+    // 左右の余りが等しい = 中央にある
+    expect(r.x).toBe(Math.round((1280 - r.width) / 2))
+    expect(1280 - (r.x + r.width)).toBe(r.x)
+  })
+
+  it('極端に小さい映像でも 1画素は確保する', () => {
+    const r = laneRect(1, 1)
+    expect(r.width).toBeGreaterThanOrEqual(1)
+    expect(r.height).toBeGreaterThanOrEqual(1)
+  })
+})
+
+describe('downscale', () => {
+  it('指定した寸法になる', () => {
+    const g = downscale(gradient(64, 64), 8, 8)
+    expect(g.width).toBe(8)
+    expect(g.height).toBe(8)
+    expect(g.data).toHaveLength(64)
+  })
+})

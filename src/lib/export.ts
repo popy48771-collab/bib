@@ -8,13 +8,26 @@
 import type { BookEntry, BibRecord } from '../types'
 import { formatIsbn13 } from './isbn'
 
-/** 出力対象。除外されたものと未確認のものは既定で落とす */
-export function exportableEntries(entries: BookEntry[], includeUnverified = false): BookEntry[] {
+/**
+ * 出力対象。
+ *
+ * 既定では「書誌DBで確定したもの」だけを出す。
+ *
+ * バーコード経路だけだった頃は、resolved が入っていれば概ね正しかった。
+ * 背表紙OCR経路ではそうはいかない。候補は出たが確信が持てないもの
+ * (needsReview) や、ソース間で食い違っているもの (conflict) を既定で
+ * 混ぜると、誤同定した本が黙って蔵書リストに載る。
+ *
+ * 蔵書リストは「後で自分が信じる台帳」なので、疑わしいものを
+ * 黙って入れてはならない。要確認のものを含めたい場合は明示的に選ばせる。
+ */
+export function exportableEntries(entries: BookEntry[], includeUnconfirmed = false): BookEntry[] {
   return entries.filter((e) => {
     if (e.status === 'excluded') return false
-    if (!e.resolved) return false
-    if (!includeUnverified && e.status === 'unverified') return false
-    return true
+    if (!e.resolved?.title) return false
+    if (includeUnconfirmed) return true
+    // 利用者が手で選んだものは、状態にかかわらず確定として扱う
+    return e.status === 'confirmed' || e.pinned
   })
 }
 
@@ -44,20 +57,25 @@ function rowOf(e: BookEntry): string[] {
  * CSV。Excel が UTF-8 を正しく開けるよう BOM を付ける。
  * 改行は CRLF (RFC 4180)。
  */
-export function toCsv(entries: BookEntry[], includeUnverified = false): string {
-  const rows = exportableEntries(entries, includeUnverified).map(rowOf)
+export function toCsv(entries: BookEntry[], includeUnconfirmed = false): string {
+  const rows = exportableEntries(entries, includeUnconfirmed).map(rowOf)
   const lines = [CSV_HEADERS.join(','), ...rows.map((r) => r.map(csvEscape).join(','))]
   return '﻿' + lines.join('\r\n') + '\r\n'
 }
 
-/** 再取り込み用。生の状態をそのまま保つ */
+/**
+ * 再取り込み用。生の状態をそのまま保つ。
+ *
+ * ここだけは全件・全状態を出す。バックアップと復元が用途であり、
+ * 要確認のまま残した本まで含めて元に戻せなければ意味がないため。
+ */
 export function toJson(entries: BookEntry[]): string {
   return JSON.stringify({ version: 1, exportedAt: new Date().toISOString(), entries }, null, 2)
 }
 
 /** Markdown 表。そのままメモやブログに貼れる */
-export function toMarkdown(entries: BookEntry[], includeUnverified = false): string {
-  const list = exportableEntries(entries, includeUnverified)
+export function toMarkdown(entries: BookEntry[], includeUnconfirmed = false): string {
+  const list = exportableEntries(entries, includeUnconfirmed)
   const head = '| タイトル | 著者 | 出版社 | 出版年 | ISBN |'
   const sep = '| --- | --- | --- | --- | --- |'
   const escapePipe = (s: string) => s.replace(/\|/g, '\\|')
@@ -82,9 +100,9 @@ function bibEscape(s: string): string {
   return s.replace(/[{}]/g, '')
 }
 
-export function toBibtex(entries: BookEntry[], includeUnverified = false): string {
+export function toBibtex(entries: BookEntry[], includeUnconfirmed = false): string {
   return (
-    exportableEntries(entries, includeUnverified)
+    exportableEntries(entries, includeUnconfirmed)
       .map((e, i) => {
         const r = e.resolved as BibRecord
         const fields: string[] = [`  title = {${bibEscape(r.title)}}`]
@@ -118,16 +136,16 @@ export const EXPORT_META: Record<ExportFormat, { label: string; ext: string; mim
   isbn: { label: 'ISBN 一覧', ext: 'txt', mime: 'text/plain;charset=utf-8' },
 }
 
-export function renderExport(format: ExportFormat, entries: BookEntry[], includeUnverified = false): string {
+export function renderExport(format: ExportFormat, entries: BookEntry[], includeUnconfirmed = false): string {
   switch (format) {
     case 'csv':
-      return toCsv(entries, includeUnverified)
+      return toCsv(entries, includeUnconfirmed)
     case 'json':
       return toJson(entries)
     case 'markdown':
-      return toMarkdown(entries, includeUnverified)
+      return toMarkdown(entries, includeUnconfirmed)
     case 'bibtex':
-      return toBibtex(entries, includeUnverified)
+      return toBibtex(entries, includeUnconfirmed)
     case 'isbn':
       return toIsbnList(entries)
   }

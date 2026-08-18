@@ -19,15 +19,26 @@ import {
   CANDIDATE_FLOOR,
   GOOGLE_BOOKS_COUNTRY,
   NDL_PROXY_URL,
+  SPINE_AUTHOR_MATCH,
+  SPINE_MAX_LOOKUPS,
+  SPINE_MIN_QUERY_LENGTH,
+  SPINE_TITLE_EXACT,
   type BibRecord,
   type BookEntry,
   type ExtractedSpine,
   type FieldConflict,
   type ScoredCandidate,
 } from '../types'
-import { matchScore } from '../lib/similarity'
+import { authorSimilarity, matchScore, titleSimilarity } from '../lib/similarity'
 import { normalizeForMatch } from '../lib/normalize'
 import { isIsbnBarcode } from '../lib/barcode'
+import {
+  buildQueries,
+  fragmentsFromText,
+  hasJapanese,
+  spineRawText,
+  type SpineQuery,
+} from '../lib/spine/parse'
 import * as googleBooks from '../sources/googleBooks'
 import * as ndl from '../sources/ndl'
 import * as openbd from '../sources/openbd'
@@ -88,7 +99,7 @@ export function entriesFromExtraction(
   return spines.map((s, i) => ({
     id: `${idPrefix}-${i}`,
     photoId,
-    rawText: [s.title, ...s.authors, s.publisher ?? ''].filter(Boolean).join(' '),
+    rawText: spineRawText(s),
     extracted: { title: s.title, authors: s.authors, publisher: s.publisher },
     extractConfidence: s.confidence,
     box: s.box,
@@ -98,6 +109,7 @@ export function entriesFromExtraction(
     // 背表紙の読み取りは「それらしいが存在しない本」を出しうる
     status: 'unverified',
     pinned: false,
+    inputKind: 'spine',
   }))
 }
 
@@ -119,6 +131,7 @@ export function entriesFromIsbns(isbns: readonly string[], idPrefix: string): Bo
     provenance: { isbn13: 'barcode' as const },
     status: 'unverified' as const,
     pinned: false,
+    inputKind: 'barcode' as const,
   }))
 }
 
@@ -370,41 +383,294 @@ async function resolveByIsbn(
   return current
 }
 
-/** 書名で照合する。読み取りが曖昧なぶん、確信が持てなければ確定させない */
+// ───────────────────────────────────────────────────────────
+// 背表紙(書名)経路
+// ───────────────────────────────────────────────────────────
+
+/**
+ * この項目から組み立てられる検索クエリ。
+ *
+ * 背表紙OCRは、どの行が書名でどの行が著者かを教えてくれない。
+ * 1つの文字列だけで引くと、副題が別行に割れた本や、役割の推定を外した本を
+ * まるごと取り逃がす。当たりやすい順に複数用意して上から試す(lib/spine/parse.ts)。
+ */
+export function queriesForEntry(entry: BookEntry): SpineQuery[] {
+  const queries = buildQueries({
+    title: entry.extracted.title,
+    authors: entry.extracted.authors,
+    publisher: entry.extracted.publisher,
+    confidence: entry.extractConfidence ?? 0,
+    fragments: fragmentsFromText(entry.rawText),
+  })
+  if (queries.length > 0) return queries
+  // 断片が1つも残らない(手入力が空など)場合の受け皿
+  return [{ title: entry.extracted.title || entry.rawText, authors: entry.extracted.authors }]
+}
+
+/**
+ * 同じ本を指すレコードをまとめる。
+ * 複数のクエリを投げるので、同じ本が何度も返ってくる。
+ */
+export function dedupeRecords(records: readonly BibRecord[]): BibRecord[] {
+  const seen = new Set<string>()
+  const out: BibRecord[] = []
+  for (const r of records) {
+    const key =
+      r.isbn13 ?? r.sourceUrl ?? `${normalizeForMatch(r.title)}|${r.authors.map(normalizeForMatch).join(',')}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(r)
+  }
+  return out
+}
+
+/**
+ * 背表紙経路の候補に点を付ける。
+ *
+ * 最有力タイトルとの類似度だけで測ると、役割の推定を外したときに
+ * 正解が閾値で切り捨てられる。組み立てた全クエリとの最大類似度で測る。
+ */
+export function scoreSpineCandidates(entry: BookEntry, records: readonly BibRecord[]): ScoredCandidate[] {
+  const queries = queriesForEntry(entry)
+  return records
+    .map((record) => ({
+      record,
+      score: Math.max(
+        ...queries.map((q) =>
+          matchScore(
+            {
+              title: q.title,
+              // クエリから著者を落としてある場合でも、著者が合っていれば加点する
+              authors: q.authors.length > 0 ? q.authors : entry.extracted.authors,
+              publisher: entry.extracted.publisher,
+            },
+            record,
+          ),
+        ),
+      ),
+    }))
+    .filter((c) => c.score >= CANDIDATE_FLOOR)
+    .sort((a, b) => b.score - a.score)
+}
+
+/** 背表紙経路で候補を出しうるソース */
+type TitleSource = 'googleBooks' | 'ndl'
+
+/** 確定してよいかの判断材料。OCR 自身の信頼度は根拠に入れない */
+export interface SpineEvidence {
+  /** 複数の書誌ソースが同じ ISBN を指した */
+  isbnAgreement: boolean
+  /** 正規化した書名がほぼ完全一致した */
+  titleExact: boolean
+  /** 著者も一致した */
+  authorMatch: boolean
+  /** ソースどうしが別の本(別の版)を最上位に返した */
+  disagreement: boolean
+  /** 照合に使えた文字数。短すぎる読みは当たっても確定させない */
+  queryLength: number
+}
+
+/** そのソースの上位 n 件の ISBN */
+function topIsbns(candidates: ScoredCandidate[] | undefined, n = 3): string[] {
+  return (candidates ?? [])
+    .slice(0, n)
+    .map((c) => c.record.isbn13)
+    .filter((v): v is string => !!v)
+}
+
+/**
+ * 確定根拠を集める。
+ *
+ * OCR の自己申告信頼度は入れない。読み違えた文字列を自信満々に返すことは
+ * いくらでもあり、「読めた」と「実在する本と一致した」は別のことである(§9.4)。
+ */
+export function collectSpineEvidence(
+  entry: BookEntry,
+  top: ScoredCandidate,
+  bySource: Partial<Record<TitleSource, ScoredCandidate[]>>,
+): SpineEvidence {
+  const queries = queriesForEntry(entry)
+  const titleExact = queries.some(
+    (q) => titleSimilarity(q.title, top.record.title) >= SPINE_TITLE_EXACT,
+  )
+  const authorMatch =
+    entry.extracted.authors.length > 0 &&
+    top.record.authors.length > 0 &&
+    authorSimilarity(entry.extracted.authors, top.record.authors) >= SPINE_AUTHOR_MATCH
+
+  const gbTop = bySource.googleBooks?.[0]
+  const ndlTop = bySource.ndl?.[0]
+
+  // 上位候補の ISBN が、別のソースの上位にも現れているか
+  const otherIsbns =
+    top.record.source === 'ndl' ? topIsbns(bySource.googleBooks) : topIsbns(bySource.ndl)
+  const isbnAgreement = !!top.record.isbn13 && otherIsbns.includes(top.record.isbn13)
+
+  // 両ソースの最上位が、似た書名なのに別の ISBN を指している = 版違いの疑い
+  const disagreement =
+    !isbnAgreement &&
+    !!gbTop?.record.isbn13 &&
+    !!ndlTop?.record.isbn13 &&
+    gbTop.record.isbn13 !== ndlTop.record.isbn13 &&
+    titleSimilarity(gbTop.record.title, ndlTop.record.title) >= 0.8
+
+  return {
+    isbnAgreement,
+    titleExact,
+    authorMatch,
+    disagreement,
+    queryLength: Math.max(...queries.map((q) => normalizeForMatch(q.title).length), 0),
+  }
+}
+
+/**
+ * 根拠から状態を決める。
+ *
+ * 最優先の指標は自動確定精度である。読み落としが多少あっても、
+ * 誤った本を確定一覧へ混ぜない。したがって確定は
+ *   - 複数ソースが同じ ISBN を指した
+ *   - 書名がほぼ完全一致し、著者も一致した
+ * の2つに限り、それ以外は人間の確認へ回す。
+ */
+export function statusFromEvidence(ev: SpineEvidence): BookEntry['status'] {
+  if (ev.queryLength < SPINE_MIN_QUERY_LENGTH) return 'needsReview'
+  if (ev.isbnAgreement) return 'confirmed'
+  if (ev.disagreement) return 'conflict'
+  if (ev.titleExact && ev.authorMatch) return 'confirmed'
+  return 'needsReview'
+}
+
+/**
+ * 書名経路の結果を統合する。純粋関数なのでテストしやすい。
+ *
+ * 与えられたソースの候補だけを差し替え、他のソースの候補には触らない。
+ * 同じ結果を二度統合しても壊れない(冪等)。
+ */
+export function mergeSpineResult(
+  entry: BookEntry,
+  bySource: Partial<Record<TitleSource, ScoredCandidate[]>>,
+): BookEntry {
+  const next: BookEntry = { ...entry, candidates: { ...entry.candidates, ...bySource } }
+
+  const all = [...(next.candidates.googleBooks ?? []), ...(next.candidates.ndl ?? [])].sort(
+    (a, b) => b.score - a.score,
+  )
+  const top = all[0]
+  if (!top) return { ...next, status: 'notFound', conflicts: undefined }
+
+  const ev = collectSpineEvidence(next, top, {
+    googleBooks: next.candidates.googleBooks,
+    ndl: next.candidates.ndl,
+  })
+  const status = statusFromEvidence(ev)
+
+  // 候補は出しておく。確定しない場合でも、行に書名が出ていないと
+  // 利用者はどの本の話なのか分からず、候補を選びようがない
+  const adopted = adoptCandidate(next, top)
+
+  const rival = all.find((c) => c.record.source !== top.record.source)
+  const conflicts =
+    status === 'conflict' && rival ? diffRecords(top.record, rival.record) : undefined
+
+  return {
+    ...adopted,
+    status,
+    conflicts: conflicts && conflicts.length > 0 ? conflicts : undefined,
+  }
+}
+
+/**
+ * 書名で照合する。
+ *
+ * ── 検索順を言語で変える ──────────────────────────────
+ * 日本語を含むなら NDL を先に当てる。法定納本ぶん網羅性が最も高く、
+ * Google Books は和書のカバレッジが弱い(CLAUDE.md §3)。
+ * 欧文中心なら逆にする。
+ *
+ * ── 1冊あたりの通信量を抑える ────────────────────────
+ * クエリは当たりやすい順に並んでいるので、当たったところで打ち切る。
+ * 両ソースには必ず当てる。片方だけで高得点でも、それは「1つのDBに
+ * 似た書名の本があった」に過ぎず、確定の根拠には足りないため。
+ */
 async function resolveByTitle(entry: BookEntry, ctx: StageContext): Promise<BookEntry> {
-  const title = entry.extracted.title || entry.rawText
-  let current = entry
+  const queries = queriesForEntry(entry)
+  const japanese = queries.some((q) => hasJapanese(q.title)) || hasJapanese(entry.rawText)
+  const order: TitleSource[] = japanese ? ['ndl', 'googleBooks'] : ['googleBooks', 'ndl']
 
-  try {
-    const records = await googleBooks.searchByTitle(title, entry.extracted.authors, {
-      country: GOOGLE_BOOKS_COUNTRY,
-      signal: ctx.signal,
-    })
-    const scored = scoreCandidates(entry, records)
-    const top = scored[0]
-    let next: BookEntry = {
-      ...current,
-      candidates: { ...current.candidates, googleBooks: scored },
-      status: statusFromScore(top),
+  // 予算はソースで分け合う。先に当てた方が使い切ると、もう片方が
+  // 最有力クエリしか撃てなくなり、合意の判定材料が乏しくなる
+  const perSource = Math.max(1, Math.ceil(SPINE_MAX_LOOKUPS / order.length))
+  const bySource: Partial<Record<TitleSource, ScoredCandidate[]>> = {}
+
+  for (const source of order) {
+    const records: BibRecord[] = []
+    let budget = perSource
+    for (const q of queries) {
+      if (budget <= 0) break
+      budget--
+      try {
+        const got =
+          source === 'ndl'
+            ? await ndl.searchByTitle(q.title, q.authors, {
+                proxyUrl: NDL_PROXY_URL,
+                signal: ctx.signal,
+              })
+            : await googleBooks.searchByTitle(q.title, q.authors, {
+                country: GOOGLE_BOOKS_COUNTRY,
+                signal: ctx.signal,
+              })
+        records.push(...got)
+      } catch (err) {
+        rethrowAbort(err)
+      }
+      if (records.length > 0) break
     }
-    if (top) next = { ...adoptCandidate(next, top), status: next.status }
-    if (next.status === 'confirmed') return next
-    current = next
-  } catch (err) {
-    rethrowAbort(err)
+    bySource[source] = scoreSpineCandidates(entry, dedupeRecords(records))
   }
+
+  const merged = mergeSpineResult(entry, bySource)
+  return enrichFromOpenBd(merged, ctx)
+}
+
+/**
+ * 確定した本を openBD で補完する。
+ *
+ * openBD は ISBN 引き専用でタイトル検索ができないので照合には使えないが、
+ * ISBN が判ったあとの書影・出版社・内容紹介の充実度は日本語書籍で最も高い。
+ * 確定した本にだけ1リクエスト足す。
+ */
+async function enrichFromOpenBd(entry: BookEntry, ctx: StageContext): Promise<BookEntry> {
+  const isbn = entry.resolved?.isbn13
+  if (!isbn || entry.status !== 'confirmed') return entry
+  if (entry.resolved?.coverUrl && entry.resolved?.publisher) return entry
 
   try {
-    const records = await ndl.searchByTitle(title, entry.extracted.authors, {
-      proxyUrl: NDL_PROXY_URL,
-      signal: ctx.signal,
-    })
-    current = mergeNdlResult(current, scoreCandidates(entry, records))
+    const hit = (await openbd.fetchByIsbns([isbn], ctx.signal)).get(isbn)
+    if (!hit) return entry
+
+    const resolved: BibRecord = { ...entry.resolved! }
+    const provenance = { ...entry.provenance }
+    for (const field of Object.keys(hit) as (keyof BibRecord)[]) {
+      if (field === 'source' || field === 'sourceUrl') continue
+      const current = resolved[field]
+      const incoming = hit[field]
+      const isEmpty =
+        current === undefined || current === '' || (Array.isArray(current) && current.length === 0)
+      if (isEmpty && incoming !== undefined && incoming !== '') {
+        assignField(resolved, field, incoming)
+        provenance[field] = 'openbd'
+      }
+    }
+    return {
+      ...entry,
+      candidates: { ...entry.candidates, openbd: [{ record: hit, score: 1 }] },
+      resolved,
+      provenance,
+    }
   } catch (err) {
     rethrowAbort(err)
+    return entry
   }
-
-  return current
 }
 
 /**

@@ -27,6 +27,25 @@ export interface ExtractedSpine {
   confidence: number
   /** 写真・映像上の位置 (0..1 相対座標)。判らないこともある */
   box?: BoundingBox
+  /**
+   * OCR が返した行の断片。
+   *
+   * 背表紙は「書名・著者・出版社」が同じ面に並んでいるだけで、
+   * どの行が何かは読み取り側には確定できない。title に最有力行を入れつつ、
+   * 全部の行をここに残しておき、照合側が複数のクエリを組み立てられるようにする。
+   */
+  fragments?: OcrFragment[]
+  /** どの読み取り機構が出したか。差し替えたときに結果を見分けるため */
+  engine?: 'tesseract' | 'remoteVision' | 'manual'
+}
+
+/** OCR が返した1行(または1語)ぶん */
+export interface OcrFragment {
+  text: string
+  /** 0..1。OCR 自身の自己申告 */
+  confidence: number
+  /** 画像上の位置 (0..1 相対座標) */
+  box?: BoundingBox
 }
 
 /** 1件の書誌候補 */
@@ -114,6 +133,21 @@ export interface BookEntry {
   pinned: boolean
   /** 突合で検出された差分の説明(UI表示用) */
   conflicts?: FieldConflict[]
+
+  /*
+   * ここから下は背表紙経路で足した項目。
+   * 以前の版で保存された IndexedDB のレコードをそのまま読めるよう、
+   * すべて optional にしてある。必須項目を足してはならない。
+   */
+
+  /** どの読み取り方式で入ったか。UI の導線（バーコード救済など）の出し分けに使う */
+  inputKind?: 'barcode' | 'spine'
+  /** 1回のカメラ起動を指す。スキャナ画面が「この読み取りで追加した本」を出すために使う */
+  scanSessionId?: string
+  /** 同じ背表紙を何コマから観測したか。多いほど読みが安定している */
+  observationCount?: number
+  /** 取り込んだクロップの簡易ハッシュ。連続コマ由来の重複を抑えるのに使う */
+  visualHash?: string
 }
 
 /** ソース間でのフィールド不一致 */
@@ -159,3 +193,24 @@ export const GOOGLE_BOOKS_COUNTRY = 'JP'
 export const AUTO_CONFIRM_THRESHOLD = 0.82
 /** これ未満なら候補として提示すらしない */
 export const CANDIDATE_FLOOR = 0.35
+
+/*
+ * ── 背表紙経路の閾値 ─────────────────────────────────
+ *
+ * バーコードと違い、背表紙の読み取りは「それらしいが存在しない本」を出す。
+ * したがって OCR の自己申告信頼度だけで確定させない。確定してよいのは
+ *  - 複数の書誌ソースが同じ ISBN を返した
+ *  - 正規化した書名がほぼ完全一致し、著者も一致した
+ * のいずれかだけで、それ以外は人間の確認へ回す(pipeline/stages.ts)。
+ *
+ * 読み落としが多少あっても、誤った本を確定一覧へ混ぜない方を採る。
+ */
+
+/** 書名がこれ以上似ていれば「ほぼ完全一致」とみなす */
+export const SPINE_TITLE_EXACT = 0.95
+/** 著者がこれ以上似ていれば一致とみなす。表記揺れの幅を見込んで緩めにする */
+export const SPINE_AUTHOR_MATCH = 0.8
+/** 正規化してこの文字数に満たない読み取りは、当たっても確定させない */
+export const SPINE_MIN_QUERY_LENGTH = 4
+/** 1冊あたりの書誌API呼び出し上限。読めない本に延々と問い合わせない */
+export const SPINE_MAX_LOOKUPS = 4

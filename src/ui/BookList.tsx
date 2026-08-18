@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { BookEntry, ScoredCandidate, SourceId } from '../types'
 import { formatIsbn13 } from '../lib/isbn'
+import { getPhoto } from '../lib/db'
 import { thumbnailUrl } from '../sources/ndl'
 
 /**
@@ -36,16 +37,41 @@ function BookCover({ isbn13, coverUrl }: { isbn13?: string; coverUrl?: string })
 }
 
 /**
- * 行の状態を説明する文。色ではなく文章で伝える。
- * 確定済みは書名と書誌が出ていること自体が結果なので、文を出さない。
+ * 読み取った背表紙そのもの。
+ *
+ * 候補を選ぶとき、本棚まで見に戻らずに済むようにする。画像は端末内
+ * (IndexedDB) にしかなく、容量不足などで保存できていないこともあるので、
+ * 取れなければ黙って出さない。書誌一覧の作成はそれで止まらない。
  */
-const STATE_TEXT: Record<BookEntry['status'], string | null> = {
-  confirmed: null,
-  needsReview: '候補が複数あります。正しいものを選んでください。',
-  conflict: '取得元によって内容が異なります。下の差分を確認してください。',
-  notFound: '書誌情報が見つかりませんでした。ISBNを確認して、もう一度読み取ってください。',
-  unverified: '書誌情報を取得していません。',
-  excluded: '書き出しの対象から除いています。',
+function SpineCropImage({ photoId }: { photoId: string }) {
+  const [url, setUrl] = useState<string | null>(null)
+
+  useEffect(() => {
+    let disposed = false
+    let objectUrl: string | null = null
+
+    getPhoto(photoId)
+      .then((photo) => {
+        if (!photo || disposed) return
+        objectUrl = URL.createObjectURL(photo.blob)
+        setUrl(objectUrl)
+      })
+      .catch(() => undefined)
+
+    return () => {
+      disposed = true
+      if (objectUrl) URL.revokeObjectURL(objectUrl)
+    }
+  }, [photoId])
+
+  if (!url) return null
+  return (
+    <figure className="crop">
+      <figcaption>読み取った背表紙</figcaption>
+      {/* 説明は figcaption が担う。画像そのものは文章に置き換えられない */}
+      <img src={url} alt="" loading="lazy" decoding="async" />
+    </figure>
+  )
 }
 
 /** 状態が問題を示すものか。文章と併せて色も添える場合の判定に使う */
@@ -56,6 +82,34 @@ const STATE_IS_PROBLEM: Record<BookEntry['status'], boolean> = {
   notFound: true,
   unverified: true,
   excluded: false,
+}
+
+/**
+ * 行の状態を説明する文。色ではなく文章で伝える。
+ * 確定済みは書名と書誌が出ていること自体が結果なので、文を出さない。
+ *
+ * 次にすべきことは読み取り方式で変わる。バーコードなら読み直せばよいが、
+ * 背表紙は読み直しても同じ結果になりやすく、文字を直すかバーコードへ
+ * 移る方が早い。
+ */
+function stateText(entry: BookEntry): string | null {
+  const spine = entry.inputKind === 'spine'
+  switch (entry.status) {
+    case 'confirmed':
+      return null
+    case 'needsReview':
+      return '候補が複数あります。正しいものを選んでください。'
+    case 'conflict':
+      return '取得元によって内容が異なります。下の差分を確認してください。'
+    case 'notFound':
+      return spine
+        ? '書誌情報が見つかりませんでした。読み取り文字を直すか、バーコードで確定してください。'
+        : '書誌情報が見つかりませんでした。ISBNを確認して、もう一度読み取ってください。'
+    case 'unverified':
+      return '書誌情報を取得していません。'
+    case 'excluded':
+      return '書き出しの対象から除いています。'
+  }
 }
 
 const SOURCE_LABEL: Record<SourceId, string> = {
@@ -83,6 +137,14 @@ interface Props {
   onRestore: (entryId: string) => void
   /** 一覧から完全に削除する */
   onDelete: (entryId: string) => void
+  /** 読み取り文字を直して照合し直す。背表紙経路の救済 */
+  onEditText?: (entryId: string, text: string) => void
+  /** この行をバーコードで確定させる。新しい行は増やさない */
+  onRescue?: (entryId: string) => void
+  /** いまバーコードで確定させようとしている行 */
+  rescuingId?: string | null
+  /** バーコードによる確定をやめる */
+  onCancelRescue?: () => void
 }
 
 type RowProps = { entry: BookEntry } & Omit<Props, 'entries'>
@@ -96,24 +158,48 @@ function allCandidates(entry: BookEntry): ScoredCandidate[] {
     .slice(0, 5)
 }
 
-function BookRow({ entry, onAdopt, onExclude, onRestore, onDelete }: RowProps) {
+function BookRow({
+  entry,
+  onAdopt,
+  onExclude,
+  onRestore,
+  onDelete,
+  onEditText,
+  onRescue,
+  rescuingId,
+  onCancelRescue,
+}: RowProps) {
   const r = entry.resolved
   const candidates = allCandidates(entry)
   // 確定済みのものは候補を畳んでおく。人間が触るべきものだけを目立たせる
-  const showCandidates =
-    entry.status !== 'confirmed' && entry.status !== 'excluded' && candidates.length > 0
+  const settled = entry.status === 'confirmed' || entry.status === 'excluded'
+  const showCandidates = !settled && candidates.length > 0
+  const fromSpine = entry.inputKind === 'spine'
 
   const [confirming, setConfirming] = useState(false)
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState(entry.rawText)
   const confirmRef = useRef<HTMLButtonElement>(null)
+  const editRef = useRef<HTMLTextAreaElement>(null)
 
   // 確認を出したら、そのままキーボードで応答できるようにする
   useEffect(() => {
     if (confirming) confirmRef.current?.focus()
   }, [confirming])
 
+  // 開いた時点の内容を入れる。entry を依存に入れると、編集中に照合結果が
+  // 返ってきたときに入力中の文字が打ち消される
+  useEffect(() => {
+    if (editing) {
+      setDraft(entry.rawText)
+      editRef.current?.focus()
+    }
+  }, [editing]) // eslint-disable-line react-hooks/exhaustive-deps
+
   const title = (r?.title ?? entry.extracted.title) || '(書名未取得)'
   const authors = r?.authors?.join('、') || entry.extracted.authors.join('、')
-  const stateText = STATE_TEXT[entry.status]
+  const state = stateText(entry)
+  const rescuing = rescuingId === entry.id
 
   return (
     <li className="record" data-excluded={entry.status === 'excluded'}>
@@ -135,22 +221,25 @@ function BookRow({ entry, onAdopt, onExclude, onRestore, onDelete }: RowProps) {
             </p>
           )}
 
-          {stateText && (
+          {state && (
             <p
               className="record__state"
               data-kind={STATE_IS_PROBLEM[entry.status] ? 'error' : 'normal'}
             >
-              {stateText}
+              {state}
             </p>
           )}
 
           {entry.pinned && <p className="record__state">手動で確定した内容です。</p>}
 
           {!r?.title && entry.rawText && (
-            <p className="record__state">読み取った内容: {entry.rawText}</p>
+            <p className="record__state">読み取った内容: {entry.rawText.split('\n').join(' / ')}</p>
           )}
         </div>
       </div>
+
+      {/* 候補を選ぶときは、読み取った背表紙そのものを並べて見比べられるようにする */}
+      {fromSpine && !settled && <SpineCropImage photoId={entry.photoId} />}
 
       {entry.conflicts && entry.conflicts.length > 0 && (
         <div className="diff">
@@ -191,6 +280,25 @@ function BookRow({ entry, onAdopt, onExclude, onRestore, onDelete }: RowProps) {
       )}
 
       <div className="record__actions">
+        {fromSpine && !settled && onEditText && (
+          <button
+            type="button"
+            className="button button--compact"
+            aria-expanded={editing}
+            onClick={() => setEditing((v) => !v)}
+          >
+            読み取り文字を修正
+          </button>
+        )}
+        {!settled && onRescue && !rescuing && (
+          <button
+            type="button"
+            className="button button--compact"
+            onClick={() => onRescue(entry.id)}
+          >
+            バーコードで確定
+          </button>
+        )}
         {entry.status === 'excluded' ? (
           <button
             type="button"
@@ -217,6 +325,54 @@ function BookRow({ entry, onAdopt, onExclude, onRestore, onDelete }: RowProps) {
           削除
         </button>
       </div>
+
+      {rescuing && (
+        <p className="record__state" role="status">
+          この本のバーコードを読み取っています。上のカメラに裏表紙のバーコードをかざしてください。{' '}
+          {onCancelRescue && (
+            <button type="button" className="button button--compact" onClick={onCancelRescue}>
+              やめる
+            </button>
+          )}
+        </p>
+      )}
+
+      {editing && onEditText && (
+        <form
+          className="record__edit"
+          onSubmit={(e) => {
+            e.preventDefault()
+            setEditing(false)
+            onEditText(entry.id, draft)
+          }}
+        >
+          <div className="field">
+            <label htmlFor={`edit-${entry.id}`}>読み取った文字</label>
+            <p className="note">
+              背表紙に印刷されているとおりに直してください。書名・著者・出版社を1行ずつに分けると当たりやすくなります。
+            </p>
+            <textarea
+              id={`edit-${entry.id}`}
+              ref={editRef}
+              value={draft}
+              rows={4}
+              onChange={(e) => setDraft(e.target.value)}
+            />
+          </div>
+          <div className="actions">
+            <button type="submit" className="button button--primary button--compact">
+              この内容で調べ直す
+            </button>
+            <button
+              type="button"
+              className="button button--compact"
+              onClick={() => setEditing(false)}
+            >
+              やめる
+            </button>
+          </div>
+        </form>
+      )}
 
       {confirming && (
         <div className="confirm" role="group" aria-label={`${title} の削除確認`}>
@@ -251,13 +407,13 @@ function BookRow({ entry, onAdopt, onExclude, onRestore, onDelete }: RowProps) {
   )
 }
 
-export function BookList({ entries, onAdopt, onExclude, onRestore, onDelete }: Props) {
+export function BookList({ entries, ...handlers }: Props) {
   if (entries.length === 0) {
     return (
       <div className="panel stack">
         <p>登録された本はまだありません。</p>
         <p className="note">
-          カメラを開始して本のバーコードをかざすと、読み取った順にここへ並びます。
+          カメラを開始して、本のバーコードまたは本棚の背表紙をかざすと、読み取った順にここへ並びます。
         </p>
       </div>
     )
@@ -304,14 +460,7 @@ export function BookList({ entries, onAdopt, onExclude, onRestore, onDelete }: P
 
       <ul className="record-list">
         {entries.map((e) => (
-          <BookRow
-            key={e.id}
-            entry={e}
-            onAdopt={onAdopt}
-            onExclude={onExclude}
-            onRestore={onRestore}
-            onDelete={onDelete}
-          />
+          <BookRow key={e.id} entry={e} {...handlers} />
         ))}
       </ul>
     </>
