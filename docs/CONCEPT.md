@@ -7,13 +7,11 @@ GitHub Pages（静的ホスティング）で動作させることを前提に�
 > 現時点で何が動くかは [CLAUDE.md](../CLAUDE.md) と [README.md](../README.md) が正。
 > 検討したが採らなかった道もそのまま残してある。現状との対応は次のとおり。
 >
-> - **方式A（Tesseract.js によるローカルOCR）** — **採った。ただし切り出しが違う。**
->   ここでは「OpenCV.js で背表紙の縦境界を検出して短冊に切る」としているが、実測すると
->   **Tesseract のレイアウト解析が背表紙を1冊ずつの縦列に分けて返す**ので、境界検出そのものが
->   要らなかった。OpenCV.js（8MB超）は入れていない（CLAUDE.md §2「背表紙の決定」）
-> - **方式B（VLM に写真を渡す）** — 一度実装したが撤去した。設定画面を廃したため
->   BYOK のキー入力口が無くなり、構成できなくなったため（§3, §4）。
->   端末内OCRの精度が足りないと実測できたときの次の手として残してある
+> - **方式A（Tesseract.js によるローカルOCR）** — **Gemini 失敗時の退避として採った。**
+>   OpenCV.js は入れず、軽量な縦投影で背表紙の短冊へ切り、短冊ごとに極性を揃えて読む
+> - **方式B（VLM に写真を渡す）** — **Gemini を主経路として採った。** 品質判定を通った棚一段を
+>   Interactions API へ1回だけ送り、Structured Output を受け取る。キー入力画面は持たず、
+>   Actions Secret からビルド時に注入する（静的サイトなので完成した JavaScript では見える）
 > - **チャットAI に読ませて結果を貼る経路** — 撤去した。写真の添付と結果の貼り戻しが
 >   手作業で、「かざすだけ」という本筋から外れていたため
 >
@@ -102,6 +100,10 @@ OpenCV.js で背表紙の縦境界を検出して短冊に切り、90°回転さ
 ---
 
 ## 4. GitHub Pages という制約と、BYOKという答え
+
+> **現在の実装は、以下の初期案から変わった。** 個人用デプロイを前提に、所有者のキーを
+> GitHub Actions Secret へ登録し、全利用者が同じキーを使う。設定画面はない。キーは Git 履歴には
+> 残らないが配信物から見えるため、Google Cloud 側の API 制限・利用量上限が必須である。
 
 GitHub Pages は**静的ホスティングであり、秘密を持てない**。
 サーバーサイドが無い以上、APIキーをアプリ側に埋め込めば全世界に公開されるのと同じ。
@@ -273,13 +275,13 @@ OCR結果は必ず汚れている。素の完全一致では歯が立たない�
 | 領域 | 選定 |
 |---|---|
 | ビルド | Vite + TypeScript |
-| UI | React（または軽量なPreact） |
-| カメラ | `getUserMedia` / `<input type="file" accept="image/*" capture>` |
-| 画像処理 | OpenCV.js（方式A時のみ遅延ロード） |
-| OCR | Tesseract.js `jpn` + `jpn_vert`（方式A） |
-| VLM | 生 `fetch`（SDKは使わない。preflight回避のため） |
+| UI | React |
+| カメラ | `getUserMedia` |
+| 画像処理 | Canvas + 自前の軽量処理（OpenCV.js は不使用） |
+| OCR | Tesseract.js `jpn` + `jpn_vert`（Gemini 失敗時） |
+| VLM | Gemini Interactions API を生 `fetch`（主経路） |
 | バーコード | `BarcodeDetector` → ZXing-wasm フォールバック |
-| 保存 | IndexedDB（写真・認識結果）/ localStorage（設定・APIキー） |
+| 保存 | IndexedDB（背表紙クロップ・認識結果） |
 | 配信 | GitHub Actions → GitHub Pages |
 | PWA | Service Worker でオフライン起動・ホーム画面追加 |
 
@@ -287,8 +289,8 @@ OCR結果は必ず汚れている。素の完全一致では歯が立たない�
 
 ### プライバシー
 
-- 既定ではすべてブラウザ内で完結。写真はどこにも送られない
-- 方式B使用時のみ画像がモデルプロバイダに送信される旨を、設定画面で明示する
+- 品質判定を通った棚一段の静止画像は Gemini API へ送る。ライブ映像は送らない
+- API には `store: false` を指定し、棚全体の画像をアプリ自身は保存しない
 - サーバーを持たない＝こちら側に蔵書データが一切残らない
 
 ---

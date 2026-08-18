@@ -249,6 +249,13 @@ export function spinesFromRecognition(
   rec: SpineRecognition,
   engine: ExtractedSpine['engine'] = 'tesseract',
 ): ExtractedSpine[] {
+  if (rec.extracted) {
+    return rec.extracted.map((spine) => ({
+      ...spine,
+      engine: spine.engine ?? engine,
+    }))
+  }
+
   const out: ExtractedSpine[] = []
   for (const column of rec.columns) {
     const spine = spineFromFragments(splitColumn(column.words), column.confidence, engine, column.box)

@@ -281,6 +281,8 @@ export function createTesseractRecognizer(): SpineRecognizer {
   }
 
   return {
+    strategy: 'segmented',
+
     async prepare() {
       await ensure()
     },

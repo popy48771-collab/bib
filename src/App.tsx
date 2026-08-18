@@ -599,6 +599,7 @@ export function App() {
               <SpineScanner
                 preparing={spineScan.state.preparing}
                 ocrError={spineScan.state.error}
+                recognitionNotice={spineScan.state.notice}
                 ocrPending={spineScan.state.pending}
                 lookupPending={pending}
                 busy={spineScan.state.busy}
@@ -849,7 +850,7 @@ export function App() {
       <footer className="site-footer">
         <div className="container">
           <p>書誌情報：国立国会図書館サーチ、openBD、Google Books</p>
-          <p>文字の読み取り：Tesseract（端末内で処理し、画像は送信しません）</p>
+          <p>文字の読み取り：Gemini（利用できない場合は端末内の Tesseract）</p>
           <ul>
             <li>
               <a href="https://github.com/popy48771-collab/bib#readme">利用上の注意</a>
@@ -859,7 +860,7 @@ export function App() {
             </li>
           </ul>
           <p>
-            読み取った蔵書データと背表紙の画像は、すべて利用者の端末内に保存されます。当サイトの提供者へ送信されることはありません。
+            棚の画像は文字の読み取りのため Google の Gemini API へ送信されます。蔵書データと切り出した背表紙画像は利用者の端末内に保存され、当サイトの提供者には送信されません。
           </p>
           <p>
             このサイトは個人が作成したもので、国立国会図書館の公式サービスではありません。行政機関が提供するサービスでもありません。

@@ -258,6 +258,29 @@ describe('spinesFromRecognition', () => {
     expect(spinesFromRecognition(rec)[0].engine).toBe('tesseract')
     expect(spineFromText('吾輩は猫である')?.engine).toBe('manual')
   })
+
+  it('画像対応モデルが組み立てた背表紙は再解釈せず受け渡す', () => {
+    const [spine] = spinesFromRecognition(
+      {
+        columns: [],
+        extracted: [
+          {
+            title: '思考の整理学',
+            authors: ['外山滋比古'],
+            confidence: 0.9,
+          },
+        ],
+        confidence: 0.9,
+        orientation: 'unknown',
+      },
+      'remoteVision',
+    )
+    expect(spine).toMatchObject({
+      title: '思考の整理学',
+      authors: ['外山滋比古'],
+      engine: 'remoteVision',
+    })
+  })
 })
 
 describe('columnText', () => {

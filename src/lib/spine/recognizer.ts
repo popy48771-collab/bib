@@ -26,7 +26,7 @@
  * ——背表紙の境界が写っていない構図——の退避経路として要る。
  */
 
-import type { BoundingBox, OcrFragment } from '../../types'
+import type { BoundingBox, ExtractedSpine, OcrFragment } from '../../types'
 
 /** 背表紙1冊ぶんに対応する縦の列 */
 export interface SpineColumn {
@@ -42,6 +42,13 @@ export interface SpineColumn {
 export interface SpineRecognition {
   /** 背表紙1冊ずつに対応する列。空なら読めなかった */
   columns: SpineColumn[]
+  /**
+   * 画像対応モデルが棚全体から直接組み立てた背表紙。
+   *
+   * Tesseract は columns を返し、Gemini はこちらを返す。書誌照合以降は
+   * ExtractedSpine に揃うので、読み取り方式の違いを持ち込まない。
+   */
+  extracted?: ExtractedSpine[]
   /** 全体の自己申告信頼度 (0..1) */
   confidence: number
   /** どちらの向きで読めたか。読めなかったときは unknown */
@@ -55,6 +62,8 @@ export interface ImageSize {
 }
 
 export interface SpineRecognizer {
+  /** 呼び出し側が棚全体と短冊のどちらを渡すべきか */
+  readonly strategy: 'segmented' | 'wholeFrame'
   /**
    * 読み取りの準備。wasm と言語モデルの取得を含むので時間がかかる。
    * カメラの許可取得と並行して呼ぶ想定。二度呼んでも1回しか走らない。
