@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { SpineTracker } from './tracker'
+import { SpineTracker, bandOverlap } from './tracker'
+import { normalizeForMatch } from '../normalize'
 
 /** 8x8 の平均ハッシュ。1文字変えると距離が 1〜4 動く */
 const HASH_A = '0f1e2d3c4b5a6978'
@@ -104,5 +105,91 @@ describe('SpineTracker — OCR後の文字列による重複', () => {
     const t = new SpineTracker()
     t.note('e1', '文化政策の現在', 1000)
     expect(t.findSame('', 1100)).toBeUndefined()
+  })
+})
+
+/*
+ * ここから下は「1つの棚から80件が並んだ」への対処。
+ *
+ * 抑止を文字列(いちばん壊れているもの)だけに頼ると、読みが部分的なときに
+ * 同じ本が別の断片として何行にも増える。位置で束ねられることを固定する。
+ */
+describe('bandOverlap', () => {
+  it('重なっていない短冊は 0', () => {
+    expect(bandOverlap({ start: 0.1, end: 0.2 }, { start: 0.3, end: 0.4 })).toBe(0)
+  })
+
+  it('狭い方の幅に対する割合で測る', () => {
+    // 0.10..0.20 と 0.15..0.35 → 重なり 0.05 / 狭い方 0.10
+    expect(bandOverlap({ start: 0.1, end: 0.2 }, { start: 0.15, end: 0.35 })).toBeCloseTo(0.5)
+  })
+
+  it('境界が数画素ずれた同じ短冊は、ほぼ全部が重なる', () => {
+    expect(bandOverlap({ start: 0.1, end: 0.2 }, { start: 0.104, end: 0.204 })).toBeGreaterThan(0.9)
+  })
+})
+
+describe('SpineTracker（位置での突き合わせ）', () => {
+  const site = (start: number, end: number, frameId: number, shelf = 1) => ({
+    band: { start, end },
+    frameId,
+    shelf,
+  })
+
+  it('同じ棚の別のコマで、重なる短冊は同じ本として束ねる（文字列が違っても）', () => {
+    const t = new SpineTracker()
+    t.note('e1', '思考の整', 1000, site(0.3, 0.36, 1))
+    // 次のコマ。読めた断片は別物だが、同じ位置なので同じ本である
+    expect(t.findSame('の整理学外山', 2000, site(0.302, 0.363, 2))?.entryId).toBe('e1')
+  })
+
+  it('同じコマの中の隣り合う短冊は、重なっていても別の本として扱う', () => {
+    const t = new SpineTracker()
+    t.note('e1', '思考の整理学', 1000, site(0.3, 0.36, 1))
+    // はみ出しぶんが重なるが、同じコマなので束ねてはならない
+    expect(t.findSame('人間失格', 1000, site(0.355, 0.42, 1))).toBeUndefined()
+  })
+
+  it('棚を移れば、同じ位置でも別の本として扱う', () => {
+    const t = new SpineTracker()
+    t.note('e1', '思考の整理学', 1000, site(0.3, 0.36, 1, 1))
+    expect(t.findSame('別の棚の本', 2000, site(0.3, 0.36, 2, 2))).toBeUndefined()
+  })
+
+  it('位置が離れていれば、同じ棚でも別の本として扱う', () => {
+    const t = new SpineTracker()
+    t.note('e1', '思考の整理学', 1000, site(0.1, 0.16, 1))
+    expect(t.findSame('人間失格', 2000, site(0.7, 0.76, 2))).toBeUndefined()
+  })
+
+  it('位置で束ねたら、その行に足す（行は増えない）', () => {
+    const t = new SpineTracker()
+    t.note('e1', '思考の整', 1000, site(0.3, 0.36, 1))
+    const again = t.note('e2', '思考の整理学 外山滋比古', 2000, site(0.3, 0.36, 2))
+    expect(again.entryId).toBe('e1')
+    expect(again.count).toBe(2)
+    // より長く読めた方を代表にする
+    expect(again.key).toBe(normalizeForMatch('思考の整理学 外山滋比古'))
+  })
+
+  it('位置が無ければ、これまでどおり文字列で束ねる', () => {
+    const t = new SpineTracker()
+    t.note('e1', '文化政策の現在 小林真理', 1000)
+    expect(t.findSame('文化政策の現在 小林真理')?.entryId).toBe('e1')
+  })
+})
+
+describe('SpineTracker#shelfFor', () => {
+  it('見た目が近いコマは同じ棚とみなす', () => {
+    const t = new SpineTracker()
+    const first = t.shelfFor('0000000000000000')
+    // 2ビットだけ違う = 手ぶれや露出の揺れの範囲
+    expect(t.shelfFor('0000000000000003')).toBe(first)
+  })
+
+  it('見た目が大きく変われば別の棚とみなす', () => {
+    const t = new SpineTracker()
+    const first = t.shelfFor('0000000000000000')
+    expect(t.shelfFor('ffffffffffffffff')).not.toBe(first)
   })
 })

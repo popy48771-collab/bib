@@ -332,6 +332,49 @@ export function decideCapture(input: CaptureDecisionInput): 'capture' | 'wait' |
 }
 
 /**
+ * 読み終えた棚を撮り続けないための線。
+ *
+ * ── なぜ要るのか ────────────────────────────────────
+ * 実機で、**1つの棚に数十秒かざしただけで80件が並んだ。**
+ *
+ * 取り込みの重複判定(ハッシュ)は、のっぺりした背表紙では露出の揺れで
+ * 簡単にすり抜ける。すり抜けるたびに棚一段ぶん(20〜30本)の短冊が
+ * 読み直され、そのつど行が増えていた。
+ *
+ * 一段を読んだら、**実際にカメラが動くまで次を撮らない。** 操作の流れ
+ * (一段を枠に収めて止める → 読み取る → 次の段へ)とも一致する。
+ */
+export const NEW_SHELF_DIFFERENCE = 0.1
+
+/**
+ * それでも撮り直してよくなるまでの時間 (ms)。
+ *
+ * 読み取りが空振りした棚を、動かないかぎり永久に読み直せないのでは
+ * 「かざしても何も起きない」に戻る。ここを過ぎたら1枚だけ撮り直す。
+ * 同じ棚の読み直しは、位置での突き合わせ(SpineTracker)が既存の行へ
+ * 束ねるので、行は増えない。
+ */
+export const SHELF_RETRY_MS = 10000
+
+export interface RearmInput {
+  /** 最後に取り込んだコマとの差 */
+  movedFromCaptured: number
+  /** 最後に取り込んでからの経過 (ms) */
+  sinceCaptureMs: number
+}
+
+/**
+ * 次のコマを撮ってよいか。取り込んだ直後の棚を撮り続けないための判定。
+ *
+ * 画面から切り出してあるのは、ここが**行が何倍にも増えるかどうかの分かれ目**
+ * だからである。閾値は実機で動かす前提の初期値なので、測れる形で持つ。
+ */
+export function shouldRearm(input: RearmInput): boolean {
+  if (input.movedFromCaptured >= NEW_SHELF_DIFFERENCE) return true
+  return input.sinceCaptureMs >= SHELF_RETRY_MS
+}
+
+/**
  * 相対座標(0..1)の枠を画素へ直す。
  * OCR が返した1冊ぶんの位置から、確認用の画像を切り出すのに使う。
  *

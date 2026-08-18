@@ -115,3 +115,36 @@ describe('describeCloseHint — 押していいのかに答える', () => {
     expect(describeCloseHint({ ocrPending: 0, lookupPending: 0, captured: 0 })).toBeNull()
   })
 })
+
+describe('describeSpineStatus（読み終えた棚）', () => {
+  it('取り込み済みの棚を映しているあいだは、次にすることを言う', () => {
+    const view = describeSpineStatus({
+      ready: true,
+      preparing: false,
+      busy: false,
+      ocrPending: 0,
+      lookupPending: 0,
+      captured: 1,
+      advice: null,
+      shelfRead: true,
+      lastOutcome: null,
+    })
+    expect(view.label).toBe('この棚は読み取り終わりました')
+    expect(view.settled).toBe(true)
+  })
+
+  it('残りがあるあいだは、読み取り済みより残りを優先して見せる', () => {
+    const view = describeSpineStatus({
+      ready: true,
+      preparing: false,
+      busy: false,
+      ocrPending: 2,
+      lookupPending: 0,
+      captured: 1,
+      advice: null,
+      shelfRead: true,
+      lastOutcome: null,
+    })
+    expect(view.label).toContain('読み取っています')
+  })
+})

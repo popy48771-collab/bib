@@ -9,6 +9,7 @@ import {
   resolveEntry,
 } from './pipeline/stages'
 import { spineFromText, spineRawText } from './lib/spine/parse'
+import { normalizeForMatch } from './lib/normalize'
 import {
   clearAll,
   deleteEntry,
@@ -233,7 +234,17 @@ export function App() {
         // 確定済み・手動確定・除外には自動処理で触らない
         const touchable =
           !existing.pinned && existing.status !== 'confirmed' && existing.status !== 'excluded'
-        const better = spine.confidence > (existing.extractConfidence ?? 0)
+        /*
+         * どちらの読みを採るか。**長く読めた方を採る。**
+         *
+         * 自己申告の信頼度だけで選ぶと、数文字の断片が高い信頼度を返したときに
+         * 良い読みを上書きする。信頼度は「その文字を読めた」ことしか語らず、
+         * 背表紙をどれだけ読めたかは語らない(§4)。同じ長さのときだけ信頼度で決める。
+         */
+        const read = normalizeForMatch(spineRawText(spine)).length
+        const held = normalizeForMatch(existing.rawText ?? '').length
+        const better =
+          read > held || (read === held && spine.confidence > (existing.extractConfidence ?? 0))
 
         if (touchable && better) {
           upsertEntry({

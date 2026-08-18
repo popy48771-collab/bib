@@ -10,8 +10,8 @@ import {
 import { spineDiagnostics } from '../lib/spine/diagnostics'
 import { SerialQueue } from '../lib/spine/queue'
 import { toFrameColumns, type SpineBand } from '../lib/spine/segment'
-import { SpineTracker } from '../lib/spine/tracker'
-import { columnText, spineRawText, spinesFromRecognition } from '../lib/spine/parse'
+import { SpineTracker, type SpineSite } from '../lib/spine/tracker'
+import { columnText, spineRawText, spinesFromRecognition, worthNewEntry } from '../lib/spine/parse'
 import { createTesseractRecognizer } from '../lib/spine/tesseract'
 import { SpineRecognizerUnavailableError, type SpineRecognizer } from '../lib/spine/recognizer'
 
@@ -111,6 +111,8 @@ export function useSpineScan({ active, onSpine }: UseSpineScanOptions): {
   const recognizerRef = useRef<SpineRecognizer | null>(null)
   const queueRef = useRef<SerialQueue | null>(null)
   const trackerRef = useRef<SpineTracker>(new SpineTracker())
+  /** 取り込んだコマの通し番号。同じコマの中の短冊どうしを束ねないために要る */
+  const frameSeqRef = useRef(0)
 
   /**
    * 走査ループから見た最新の onSpine。
@@ -180,18 +182,39 @@ export function useSpineScan({ active, onSpine }: UseSpineScanOptions): {
     if (queue.isFull) return 'busy'
     tracker.noteCapture(frame.hash, frame.at)
 
-    /**
-     * 1冊ぶんを一覧へ渡す。
-     *
-     * 短冊を読むたびに呼ぶので、行は1冊ずつ増える。重複抑止（同じ背表紙を
-     * 別のコマから読んだ場合）はここで通す。突き合わせる相手は
-     * 「直近に読んだ何冊か」で、時間では切らない(lib/spine/tracker.ts の冒頭)。
+    /*
+     * このコマの身元。棚の世代は取り込んだ順に決まるので、ここ(同期側)で
+     * 確定させる。待ち行列の中で決めると、処理の順に引きずられる。
      */
-    const emit = (spine: ExtractedSpine, crop: CroppedImage | null): void => {
+    const shelf = tracker.shelfFor(frame.hash)
+    const frameId = ++frameSeqRef.current
+
+    /**
+     * 1冊ぶんを一覧へ渡す。読めたら true。
+     *
+     * 短冊を読むたびに呼ぶので、行は1冊ずつ増える。重複抑止はここで通す。
+     * **位置(同じ棚・別のコマ・重なる短冊)を先に見る。** 文字列だけで
+     * 束ねていたとき、読みが部分的だと同じ本が別の断片として何行にも
+     * 増えた(lib/spine/tracker.ts の冒頭)。
+     */
+    const emit = (spine: ExtractedSpine, crop: CroppedImage | null, band?: SpineBand): boolean => {
       const key = spineRawText(spine)
-      const same = tracker.findSame(key)
+      const site: SpineSite | undefined = band ? { band, frameId, shelf } : undefined
+      const same = tracker.findSame(key, frame.at, site)
+
+      /*
+       * 読めた文字が短すぎるものは、それ自体では行にしない。
+       *
+       * 4文字に満たない読みは、当たっても確定させない決まりである(§4)。
+       * 確定しえないものを行にすると、一覧は「部分的に読めた断片」で
+       * 埋まる(実機で80件出た)。既にある行を補強するぶんには通す。
+       * 短い書名の本を取り逃がしうるが、断片の山に紛れるよりは救いやすい。
+       */
+      if (!same && !worthNewEntry(key)) return false
+
       const entryId = onSpineRef.current(spine, crop, same?.entryId)
-      if (entryId) tracker.note(entryId, key, frame.at)
+      if (entryId) tracker.note(entryId, key, frame.at, site)
+      return true
     }
 
     const queued = queue.push(async () => {
@@ -199,6 +222,11 @@ export function useSpineScan({ active, onSpine }: UseSpineScanOptions): {
       const diagnosticId = spineDiagnostics.begin(frame)
       spineDiagnostics.update(diagnosticId, { bands: frame.bands, preview: frame.blob })
       let produced = 0
+      /*
+       * 読めた本数と、一覧へ出した本数は別に数える。短すぎる読みは
+       * 行にしないが、**読めてはいる**ので、コマ全体への退避は起こさない。
+       */
+      let recognized = 0
 
       // ── 本筋: 背表紙ごとの短冊を1本ずつ読む ──────────────
       if (frame.bands.length >= MIN_STRIPS) {
@@ -242,9 +270,9 @@ export function useSpineScan({ active, onSpine }: UseSpineScanOptions): {
           })
 
           for (const spine of spines) {
-            produced++
+            recognized++
             // 確認用は短冊そのもの。短冊1本が背表紙1冊にあたる
-            emit(spine, strip.preview)
+            if (emit(spine, strip.preview, strip.band)) produced++
           }
         }
       }
@@ -255,7 +283,7 @@ export function useSpineScan({ active, onSpine }: UseSpineScanOptions): {
        * 切れてはいたが1本も読めなかった場合の受け皿。
        * 極性の混在には弱いが、以前はこれだけで動いていた経路なので残す。
        */
-      if (produced === 0) {
+      if (recognized === 0) {
         spineDiagnostics.update(diagnosticId, { mode: 'frame' })
         let spines: ExtractedSpine[] = []
         try {
@@ -281,14 +309,14 @@ export function useSpineScan({ active, onSpine }: UseSpineScanOptions): {
             /* 画像が無くても書名は出せる */
           }
           for (const [i, spine] of spines.entries()) {
-            produced++
-            emit(spine, crops[i] ?? null)
+            recognized++
+            if (emit(spine, crops[i] ?? null)) produced++
           }
         }
       }
 
       spineDiagnostics.update(diagnosticId, { spines: produced, ms: Date.now() - startedAt })
-      if (produced === 0) setUnreadable((n) => n + 1)
+      if (recognized === 0) setUnreadable((n) => n + 1)
     })
 
     return queued ? 'queued' : 'busy'

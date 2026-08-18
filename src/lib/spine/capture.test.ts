@@ -20,6 +20,9 @@ import {
   toGray,
   visualHash,
   type RgbaImage,
+  shouldRearm,
+  NEW_SHELF_DIFFERENCE,
+  SHELF_RETRY_MS,
 } from './capture'
 
 /** 濃淡だけの画像を作る。RGB を同じ値にすれば輝度はそのまま v になる */
@@ -267,5 +270,29 @@ describe('downscale', () => {
     expect(g.width).toBe(8)
     expect(g.height).toBe(8)
     expect(g.data).toHaveLength(64)
+  })
+})
+
+/*
+ * 読み終えた棚を撮り続けないための判定。
+ * 実機で1つの棚から80件が並んだ原因の半分がここにあった。
+ */
+describe('shouldRearm', () => {
+  it('取り込んだ直後の同じ構図では撮らない', () => {
+    expect(shouldRearm({ movedFromCaptured: 0.01, sinceCaptureMs: 1500 })).toBe(false)
+  })
+
+  it('露出の揺れ程度の差では撮らない', () => {
+    expect(shouldRearm({ movedFromCaptured: NEW_SHELF_DIFFERENCE - 0.01, sinceCaptureMs: 3000 })).toBe(
+      false,
+    )
+  })
+
+  it('別の段へ移せば撮る', () => {
+    expect(shouldRearm({ movedFromCaptured: 0.3, sinceCaptureMs: 300 })).toBe(true)
+  })
+
+  it('動かないままでも、しばらく経てば撮り直す（空振りした棚を諦めない）', () => {
+    expect(shouldRearm({ movedFromCaptured: 0, sinceCaptureMs: SHELF_RETRY_MS })).toBe(true)
   })
 })

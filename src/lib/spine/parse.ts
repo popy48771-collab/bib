@@ -13,7 +13,7 @@
  * 「全文で引く」クエリと「末尾を削った前方一致」を必ず残してある。
  */
 
-import type { ExtractedSpine, OcrFragment } from '../../types'
+import { SPINE_MIN_QUERY_LENGTH, type ExtractedSpine, type OcrFragment } from '../../types'
 import { normalizeForMatch, tidy } from '../normalize'
 import type { SpineColumn, SpineRecognition } from './recognizer'
 import { readsDownward } from './segment'
@@ -391,4 +391,18 @@ export function buildQueries(spine: ExtractedSpine): SpineQuery[] {
 /** 照合に使う文字数。これが短すぎるものは当たっても確定させない */
 export function queryLength(spine: { title: string; authors: string[] }): number {
   return normalizeForMatch(spine.title).length
+}
+
+/**
+ * この読みだけで一覧に行を作ってよいか。
+ *
+ * 4文字に満たない読みは、当たっても確定させない決まりである(§4)。
+ * **確定しえないものを行にすると、一覧が断片で埋まる。** 実機では1つの棚から
+ * 80件が並び、その大半が数文字の断片だった。
+ *
+ * 既にある行を補強するぶんには通してよい(呼び出し側の判断)。短い書名の本を
+ * 取り逃がしうるが、断片の山に埋もれるよりは手で拾いやすい。
+ */
+export function worthNewEntry(rawText: string): boolean {
+  return normalizeForMatch(rawText).length >= SPINE_MIN_QUERY_LENGTH
 }

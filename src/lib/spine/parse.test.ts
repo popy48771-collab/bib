@@ -13,6 +13,7 @@ import {
   spinesFromRecognition,
   splitColumn,
   stripAuthorRole,
+  worthNewEntry,
 } from './parse'
 import type { SpineColumn, SpineRecognition } from './recognizer'
 import type { OcrFragment } from '../../types'
@@ -333,5 +334,21 @@ describe('spineFromText / fragmentsFromText', () => {
 
   it('空行は落とす', () => {
     expect(fragmentsFromText('a\n\nb')).toHaveLength(2)
+  })
+})
+
+describe('worthNewEntry', () => {
+  it('4文字に満たない読みでは、単独で行を作らない', () => {
+    expect(worthNewEntry('の整理')).toBe(false)
+    expect(worthNewEntry('ェェ')).toBe(false)
+    expect(worthNewEntry('')).toBe(false)
+  })
+
+  it('4文字あれば行にしてよい', () => {
+    expect(worthNewEntry('思考の整理学')).toBe(true)
+  })
+
+  it('記号や空白は文字数に数えない', () => {
+    expect(worthNewEntry('「 の 」')).toBe(false)
   })
 })

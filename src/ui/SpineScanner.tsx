@@ -10,6 +10,7 @@ import {
   frameAdvice,
   frameDifference,
   isUsable,
+  shouldRearm,
   toGray,
   visualHash,
   type GrayImage,
@@ -126,6 +127,8 @@ export function SpineScanner({
   const [advice, setAdvice] = useState<string | null>(null)
   /** 品質は足りているが、まだ止まっていない */
   const [moving, setMoving] = useState(false)
+  /** いま映っている棚は取り込み済みで、動かすまで撮り直さない */
+  const [shelfRead, setShelfRead] = useState(false)
   /** 直近の取り込み結果。一定時間で消す */
   const [lastOutcome, setLastOutcome] = useState<CaptureOutcome | null>(null)
   const [captured, setCaptured] = useState(0)
@@ -142,6 +145,9 @@ export function SpineScanner({
     let stream: MediaStream | null = null
     let timer: ReturnType<typeof setTimeout> | undefined
     let previous: GrayImage | null = null
+    /** 最後に取り込んだコマ。同じ棚を撮り続けないための突き合わせに使う */
+    let capturedGray: GrayImage | null = null
+    let capturedAt = 0
     let stable = 0
     /** この待ちが始まった時刻。救済までの経過を測るのに使う */
     let waitingSince = Date.now()
@@ -238,6 +244,26 @@ export function SpineScanner({
       }
       setMoving(false)
 
+      /*
+       * 取り込んだ棚を撮り続けない。
+       *
+       * **ここが「行が何倍に増えるか」の分かれ目である。** 取り込みの重複判定
+       * (ハッシュ)は露出の揺れで簡単にすり抜け、すり抜けるたびに棚一段ぶんの
+       * 短冊が読み直されていた。実機では1つの棚に数十秒かざしただけで
+       * 80件が並んだ。実際にカメラが動くまで、次は撮らない。
+       */
+      if (
+        capturedGray &&
+        !shouldRearm({
+          movedFromCaptured: frameDifference(capturedGray, gray),
+          sinceCaptureMs: Date.now() - capturedAt,
+        })
+      ) {
+        setShelfRead(true)
+        return schedule()
+      }
+      setShelfRead(false)
+
       // 読み取りが追いついていなければ、撮らずに待つ
       if (liveRef.current.busy) return schedule()
 
@@ -247,6 +273,11 @@ export function SpineScanner({
 
       const outcome = liveRef.current.onCapture(shot)
       setLastOutcome(outcome)
+      if (outcome === 'queued' || outcome === 'duplicate') {
+        // この構図は処理済み。動かすまで撮り直さない
+        capturedGray = gray
+        capturedAt = Date.now()
+      }
       if (outcome === 'queued') {
         // 目は棚を見ているので、撮れたことは振動で返す
         signalHit()
@@ -324,6 +355,7 @@ export function SpineScanner({
     captured,
     advice,
     moving,
+    shelfRead,
     lastOutcome,
   })
   const closeHint = describeCloseHint({ ocrPending, lookupPending, captured })

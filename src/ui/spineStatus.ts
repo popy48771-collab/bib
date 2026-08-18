@@ -36,6 +36,13 @@ export interface SpineStatusInput {
    * （実機でそう報告された）。撮れない理由は必ず文にする。
    */
   moving?: boolean
+  /**
+   * いま映っている棚は取り込み済みで、動かすまで撮り直さない。
+   *
+   * 撮らない理由を黙っていると、moving と同じく「かざしているのに
+   * 何も起きない」に見える。
+   */
+  shelfRead?: boolean
   /** 直近の取り込み結果 */
   lastOutcome: 'queued' | 'duplicate' | 'busy' | 'unavailable' | null
 }
@@ -127,7 +134,7 @@ export function describeSpineStatus(input: SpineStatusInput): SpineStatusView {
   }
 
   // 撮った枚数があり、残りが無く、いま映っている棚も取り込み済み = 終わってよい
-  if (input.captured > 0 && input.lastOutcome === 'duplicate') {
+  if (input.captured > 0 && (input.shelfRead || input.lastOutcome === 'duplicate')) {
     return {
       kind: 'duplicate',
       label: 'この棚は読み取り終わりました',
