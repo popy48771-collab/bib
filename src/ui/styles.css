@@ -783,18 +783,16 @@ textarea::placeholder {
 }
 
 /*
- * 中央の読取レーン。ここを通過した背表紙だけを取り込む。
- * 値は lib/spine/capture.ts の LANE_WIDTH_RATIO / LANE_HEIGHT_RATIO と対にする
- * （幅 18% → 左右 41%、高さ 92% → 上下 4%）。
+ * 棚の枠。ここに棚の一段を収めてもらう。
+ *
+ * 取り込むのはフレーム全体であって、この枠の内側だけではない。
+ * 枠は「この大きさに棚が写る距離まで近づく」ことを伝えるための案内で、
+ * 値は lib/spine/capture.ts の SHELF_GUIDE_INSET と対にする。
  */
-.scanner-lane {
+.scanner-shelf {
   position: absolute;
-  top: 4%;
-  bottom: 4%;
-  left: 41%;
-  right: 41%;
-  border-left: 2px solid var(--color-neutral-white);
-  border-right: 2px solid var(--color-neutral-white);
+  inset: 4%;
+  border: 2px solid var(--color-neutral-white);
   /*
    * 白い線だけだと、白い紙のカバーに重なったときに枠が消える。
    * 外側に黒の細線を添えて、明るい背表紙の上でも輪郭が残るようにする。

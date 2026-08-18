@@ -3,8 +3,16 @@ import { SPINE_MAX_LOOKUPS } from '../types'
 import type { BibRecord, BookEntry, ExtractedSpine, ScoredCandidate } from '../types'
 
 vi.mock('../sources/openbd', () => ({ fetchByIsbns: vi.fn() }))
-vi.mock('../sources/googleBooks', () => ({ searchByIsbn: vi.fn(), searchByTitle: vi.fn() }))
-vi.mock('../sources/ndl', () => ({ searchByIsbn: vi.fn(), searchByTitle: vi.fn() }))
+vi.mock('../sources/googleBooks', () => ({
+  searchByIsbn: vi.fn(),
+  searchByTitle: vi.fn(),
+  searchByKeyword: vi.fn(),
+}))
+vi.mock('../sources/ndl', () => ({
+  searchByIsbn: vi.fn(),
+  searchByTitle: vi.fn(),
+  searchByKeyword: vi.fn(),
+}))
 
 import * as googleBooks from '../sources/googleBooks'
 import * as ndl from '../sources/ndl'
@@ -14,6 +22,7 @@ import {
   dedupeRecords,
   entriesFromExtraction,
   mergeSpineResult,
+  nearExactMatches,
   queriesForEntry,
   resolveEntry,
   scoreSpineCandidates,
@@ -56,7 +65,9 @@ const gbRecord: BibRecord = { ...ndlRecord, authors: ['小林真理'], source: '
 function allMiss() {
   vi.mocked(openbd.fetchByIsbns).mockResolvedValue(new Map())
   vi.mocked(googleBooks.searchByTitle).mockResolvedValue([])
+  vi.mocked(googleBooks.searchByKeyword).mockResolvedValue([])
   vi.mocked(ndl.searchByTitle).mockResolvedValue([])
+  vi.mocked(ndl.searchByKeyword).mockResolvedValue([])
   vi.mocked(googleBooks.searchByIsbn).mockResolvedValue([])
   vi.mocked(ndl.searchByIsbn).mockResolvedValue([])
 }
@@ -87,7 +98,7 @@ describe('entriesFromExtraction', () => {
 describe('queriesForEntry', () => {
   it('当たりやすい順に複数のクエリへ展開する', () => {
     const queries = queriesForEntry(spineEntry())
-    expect(queries[0]).toEqual({ title: '文化政策の現在', authors: ['小林真理'] })
+    expect(queries[0]).toEqual({ title: '文化政策の現在', authors: ['小林真理'], mode: 'title' })
     expect(queries.length).toBeGreaterThan(1)
   })
 
@@ -138,6 +149,7 @@ function evidence(over: Partial<SpineEvidence> = {}): SpineEvidence {
     isbnAgreement: false,
     titleExact: false,
     authorMatch: false,
+    repeatedObservation: false,
     disagreement: false,
     queryLength: 10,
     ...over,
@@ -166,6 +178,18 @@ describe('statusFromEvidence — 自動確定の規則', () => {
     expect(
       statusFromEvidence(evidence({ titleExact: true, authorMatch: true, queryLength: 2 })),
     ).toBe('needsReview')
+  })
+
+  it('別のコマからも同じ本に着地したなら確定する', () => {
+    // 著者は崩れやすい。独立した2回の観測が同じ ISBN を指すなら、
+    // 1つのDBだけの高得点より強い根拠になる
+    expect(statusFromEvidence(evidence({ titleExact: true, repeatedObservation: true }))).toBe(
+      'confirmed',
+    )
+  })
+
+  it('再観測だけでは確定させない（同じ読み違えを繰り返しうる）', () => {
+    expect(statusFromEvidence(evidence({ repeatedObservation: true }))).toBe('needsReview')
   })
 
   it('候補があっても根拠が無ければ人間の確認へ回す', () => {
@@ -272,6 +296,47 @@ describe('mergeSpineResult', () => {
 
 // ───────────────────────────────────────────────────────────
 
+describe('nearExactMatches — まとめて確定できる行', () => {
+  const scored = (record: BibRecord, score: number): ScoredCandidate[] => [{ record, score }]
+
+  it('書名がほぼ一致している要確認の行を拾う', () => {
+    const entry: BookEntry = {
+      ...spineEntry(),
+      status: 'needsReview',
+      candidates: { ndl: scored(ndlRecord, 0.8) },
+    }
+    expect(nearExactMatches([entry])).toHaveLength(1)
+  })
+
+  it('書名が似ているだけの行は拾わない', () => {
+    const entry: BookEntry = {
+      ...spineEntry(),
+      status: 'needsReview',
+      candidates: { ndl: scored({ ...ndlRecord, title: '文化政策の展開と課題' }, 0.8) },
+    }
+    expect(nearExactMatches([entry])).toHaveLength(0)
+  })
+
+  it('確定済み・手動確定済みは対象にしない', () => {
+    const base: BookEntry = { ...spineEntry(), candidates: { ndl: scored(ndlRecord, 0.8) } }
+    expect(nearExactMatches([{ ...base, status: 'confirmed' }])).toHaveLength(0)
+    expect(nearExactMatches([{ ...base, status: 'needsReview', pinned: true }])).toHaveLength(0)
+  })
+
+  it('読めた文字が短すぎる行は対象にしない', () => {
+    const short: BookEntry = {
+      ...spineEntry({ title: '猫', authors: [], fragments: [{ text: '猫', confidence: 0.9 }] }),
+      status: 'needsReview',
+      candidates: { ndl: scored({ ...ndlRecord, title: '猫' }, 0.9) },
+    }
+    expect(nearExactMatches([short])).toHaveLength(0)
+  })
+
+  it('候補が無ければ対象にしない', () => {
+    expect(nearExactMatches([{ ...spineEntry(), status: 'needsReview' }])).toHaveLength(0)
+  })
+})
+
 describe('resolveEntry — 背表紙(書名)経路', () => {
   it('日本語なら NDL を先に当てる（和書の網羅性が最も高い）', async () => {
     const order: string[] = []
@@ -338,16 +403,23 @@ describe('resolveEntry — 背表紙(書名)経路', () => {
   })
 
   it('最初のクエリで外れたら次のクエリを試す', async () => {
+    // 書名がまるごと一致しないと引けないソースでも、末尾を削れば当たる
     const tried: string[] = []
     vi.mocked(ndl.searchByTitle).mockImplementation(async (title) => {
       tried.push(title)
-      return title.includes('小林真理') ? [ndlRecord] : []
+      return title === '文化政策の現' ? [ndlRecord] : []
     })
 
     const resolved = await resolveEntry(spineEntry())
 
     expect(tried.length).toBeGreaterThan(1)
     expect(resolved.candidates.ndl?.length).toBe(1)
+  })
+
+  it('当たったクエリで打ち切る（無駄な通信をしない）', async () => {
+    vi.mocked(ndl.searchByTitle).mockResolvedValue([ndlRecord])
+    await resolveEntry(spineEntry())
+    expect(vi.mocked(ndl.searchByTitle).mock.calls).toHaveLength(1)
   })
 
   it('1冊あたりの問い合わせ回数に上限を置く', async () => {
@@ -424,6 +496,30 @@ describe('resolveEntry — 背表紙(書名)経路', () => {
   it('中断は上へ抜ける', async () => {
     vi.mocked(ndl.searchByTitle).mockRejectedValue(new DOMException('Aborted', 'AbortError'))
     await expect(resolveEntry(spineEntry())).rejects.toThrow(DOMException)
+  })
+
+  it('書名の項目で外れたら、末尾を削った前方一致を試す', async () => {
+    // 実測で崩れるのは末尾の1〜2文字が多い。「文化政策の現在」→「文化政策の現不」
+    const tried: string[] = []
+    vi.mocked(ndl.searchByTitle).mockImplementation(async (title) => {
+      tried.push(title)
+      return []
+    })
+
+    await resolveEntry(
+      spineEntry({
+        title: '文化政策の現不',
+        fragments: [{ text: '文化政策の現不', confidence: 0.9 }],
+      }),
+    )
+
+    expect(tried.some((t) => t === '文化政策の現')).toBe(true)
+  })
+
+  it('最後は全項目のキーワードで引く', async () => {
+    await resolveEntry(spineEntry())
+    // 書名の項目で全部外れたら、当たりの広いキーワード検索へ落とす
+    expect(ndl.searchByKeyword).toHaveBeenCalled()
   })
 
   it('手で確定した項目・除外した項目には触らない', async () => {

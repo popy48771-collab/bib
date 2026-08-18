@@ -130,8 +130,16 @@ const FIELD_LABEL: Record<string, string> = {
   isbn13: 'ISBN',
 }
 
+/** 手を入れる必要がある行か。確定済みと除外済み以外はすべて当てはまる */
+export function needsAttention(entry: BookEntry): boolean {
+  return entry.status !== 'confirmed' && entry.status !== 'excluded'
+}
+
 interface Props {
+  /** 一覧に入っている全件。件数の内訳はこちらから数える */
   entries: BookEntry[]
+  /** true なら、手を入れる必要がある行だけを描く */
+  onlyAttention?: boolean
   onAdopt: (entryId: string, candidate: ScoredCandidate) => void
   onExclude: (entryId: string) => void
   onRestore: (entryId: string) => void
@@ -147,7 +155,7 @@ interface Props {
   onCancelRescue?: () => void
 }
 
-type RowProps = { entry: BookEntry } & Omit<Props, 'entries'>
+type RowProps = { entry: BookEntry } & Omit<Props, 'entries' | 'onlyAttention'>
 
 /** 全候補をソース混在でスコア順に並べる */
 function allCandidates(entry: BookEntry): ScoredCandidate[] {
@@ -407,7 +415,7 @@ function BookRow({
   )
 }
 
-export function BookList({ entries, ...handlers }: Props) {
+export function BookList({ entries, onlyAttention = false, ...handlers }: Props) {
   if (entries.length === 0) {
     return (
       <div className="panel stack">
@@ -424,6 +432,8 @@ export function BookList({ entries, ...handlers }: Props) {
     return acc
   }, {})
   const unresolved = (counts.notFound ?? 0) + (counts.unverified ?? 0)
+  // 件数の内訳は全件から数え、描くのは絞り込んだぶんだけ
+  const shown = onlyAttention ? entries.filter(needsAttention) : entries
 
   return (
     <>
@@ -458,11 +468,17 @@ export function BookList({ entries, ...handlers }: Props) {
         ) : null}
       </ul>
 
-      <ul className="record-list">
-        {entries.map((e) => (
-          <BookRow key={e.id} entry={e} {...handlers} />
-        ))}
-      </ul>
+      {shown.length === 0 ? (
+        <div className="panel">
+          <p>手を入れる必要がある本はありません。</p>
+        </div>
+      ) : (
+        <ul className="record-list">
+          {shown.map((e) => (
+            <BookRow key={e.id} entry={e} {...handlers} />
+          ))}
+        </ul>
+      )}
     </>
   )
 }

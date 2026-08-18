@@ -17,11 +17,19 @@ declare module 'tesseract.js/dist/tesseract.esm.min.js' {
     y1: number
   }
 
+  export interface TesseractWord {
+    text: string
+    /** 0..100 */
+    confidence: number
+    bbox: TesseractBbox
+  }
+
   export interface TesseractLine {
     text: string
     /** 0..100 */
     confidence: number
     bbox: TesseractBbox
+    words: TesseractWord[]
   }
 
   export interface TesseractParagraph {

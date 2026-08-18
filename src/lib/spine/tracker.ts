@@ -48,7 +48,12 @@ export interface TrackerOptions {
 }
 
 const DEFAULT_WINDOW_MS = 8000
-const DEFAULT_RECENT_COUNT = 12
+/*
+ * 1枚のコマから棚一段ぶん(20〜30冊)が入るので、突き合わせる相手も
+ * それを超える件数を持っておく。少ないと、1枚を処理し終える前に
+ * 最初の方の本が窓から押し出され、次のコマで同じ本がもう一度行になる。
+ */
+const DEFAULT_RECENT_COUNT = 80
 const DEFAULT_SIMILARITY = 0.72
 
 /**

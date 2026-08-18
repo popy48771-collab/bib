@@ -1,21 +1,28 @@
 /**
- * 読取レーンの切り出しと、コマの品質判定
+ * コマの取り込みと品質判定
  *
- * ── なぜ「中央読取レーン」なのか ────────────────────────
- * 画面内の背表紙をすべて同時に切り分けようとすると、背表紙の境界検出が
- * 要る。日本語の棚は本の高さも厚みも不揃いで、直線検出には OpenCV.js
- * (8MB超) を持ち込むことになる。
+ * ── なぜ「棚をまるごと1枚」なのか ──────────────────────
+ * 最初は画面中央に背表紙1冊ぶんの帯(読取レーン)を置き、そこを通った本だけを
+ * 取り込んでいた。実測したところ、この前提が成り立っていなかった。
  *
- * 代わりに、画面中央へ背表紙1冊ぶんの縦長の帯を置き、棚に沿って
- * カメラを横へ流してもらう。帯を通過した背表紙だけを取り込むので、
- *  - 境界検出が要らない
- *  - 1冊ぶんに解像度を割ける
- *  - Canvas 2D だけで完結する
- * という利点がある。「かざすだけ」という操作の性質も変わらない。
+ * 棚の一段が画面に収まる距離では、幅18%のレーンは**約5.3冊ぶんを覆う**。
+ * 5冊の背表紙が1枚の画像に混ざった状態で OCR にかけることになり、文字が崩れる。
+ * レーンを8%まで絞ってもまだ1.7冊で、背表紙の厚みは文庫1.5cmから画集4cmまで
+ * 幅があるため、**固定幅のレーンで1冊ちょうどを切り出すことは原理的にできない**。
  *
- * ここに置くのは Canvas に依存しない純粋な計算が主。DOM を触るのは
- * 末尾の3つだけで、テストからは呼ばない。
+ * 一方、フレーム全体をそのまま OCR にかけると、Tesseract 自身のレイアウト解析が
+ * 背表紙を1冊ずつの縦列に分離する。合成した30冊の棚で、ぼけ・照明ムラ・ノイズを
+ * 加えても24冊の書名が読めた。**背表紙の境界を自前で検出する必要はなく、
+ * OpenCV.js も要らない。**
+ *
+ * したがってここでは、
+ *  - フレーム全体を取り込む
+ *  - 取り込んでよいコマかを品質で判定する
+ *  - OCR が返した位置をもとに、1冊ぶんを切り出す(確認用の画像)
+ * をやる。Canvas に依存しない純粋な計算が主で、DOM を触るのは末尾だけ。
  */
+
+import type { BoundingBox } from '../../types'
 
 /** ImageData 互換。テストから作れるよう構造だけで受ける */
 export interface RgbaImage {
@@ -66,9 +73,13 @@ export const STILL_THRESHOLD = 0.045
 /** これ以下のハッシュ距離なら同じ背表紙を写しているとみなす */
 export const SIMILAR_HASH_DISTANCE = 6
 
-/** 読取レーンの寸法。横向きに構えた画面の中央へ縦長に置く */
-export const LANE_WIDTH_RATIO = 0.18
-export const LANE_HEIGHT_RATIO = 0.92
+/**
+ * 画面に出す「棚の枠」。取り込む範囲そのものではなく、構え方の案内。
+ *
+ * この枠に棚の一段を収めてもらうと、背表紙の高さが画面の縦をほぼ埋め、
+ * 書名の文字が OCR に足る大きさ(実測で 40px 以上)になる。
+ */
+export const SHELF_GUIDE_INSET = 0.04
 
 /** ITU-R BT.601 の輝度。整数演算で足りる */
 export function toGray(image: RgbaImage): GrayImage {
@@ -239,30 +250,36 @@ export function pickSharpest<T extends { quality: FrameQuality }>(frames: readon
   return best
 }
 
-/** 映像内での読取レーンの位置(画素)。UI の枠と切り出しで同じ値を使う */
-export function laneRect(
-  videoWidth: number,
-  videoHeight: number,
-  widthRatio = LANE_WIDTH_RATIO,
-  heightRatio = LANE_HEIGHT_RATIO,
+/**
+ * 相対座標(0..1)の枠を画素へ直す。
+ * OCR が返した1冊ぶんの位置から、確認用の画像を切り出すのに使う。
+ *
+ * 枠は少し広げる。OCR の返す枠は文字にぴったり張り付いており、
+ * そのまま切ると背表紙の地色が入らず、何の画像か分からなくなる。
+ */
+export function boxToRect(
+  box: BoundingBox,
+  imageWidth: number,
+  imageHeight: number,
+  padRatio = 0.35,
 ): { x: number; y: number; width: number; height: number } {
-  const width = Math.max(1, Math.round(videoWidth * widthRatio))
-  const height = Math.max(1, Math.round(videoHeight * heightRatio))
-  return {
-    x: Math.round((videoWidth - width) / 2),
-    y: Math.round((videoHeight - height) / 2),
-    width,
-    height,
-  }
+  const padX = box.width * imageWidth * padRatio
+  // 縦は文字の並びなので、横ほど広げなくてよい
+  const padY = box.height * imageHeight * padRatio * 0.06
+  const x = Math.max(0, Math.round(box.x * imageWidth - padX))
+  const y = Math.max(0, Math.round(box.y * imageHeight - padY))
+  const right = Math.min(imageWidth, Math.round((box.x + box.width) * imageWidth + padX))
+  const bottom = Math.min(imageHeight, Math.round((box.y + box.height) * imageHeight + padY))
+  return { x, y, width: Math.max(1, right - x), height: Math.max(1, bottom - y) }
 }
 
 // ── ここから下は DOM を触る。テストからは呼ばない ────────────
 
 /**
- * 読取レーンを canvas へ描く。targetWidth を指定すると縮小して描く
+ * フレーム全体を canvas へ描く。targetWidth を指定すると縮小して描く
  * (毎コマの品質判定用)。描けなければ null。
  */
-export function drawLane(
+export function drawFrame(
   video: HTMLVideoElement,
   canvas: HTMLCanvasElement,
   targetWidth?: number,
@@ -271,18 +288,61 @@ export function drawLane(
   const vh = video.videoHeight
   if (!vw || !vh) return null
 
-  const rect = laneRect(vw, vh)
-  const scale = targetWidth ? Math.min(1, targetWidth / rect.width) : 1
-  const dw = Math.max(1, Math.round(rect.width * scale))
-  const dh = Math.max(1, Math.round(rect.height * scale))
+  const scale = targetWidth ? Math.min(1, targetWidth / vw) : 1
+  const dw = Math.max(1, Math.round(vw * scale))
+  const dh = Math.max(1, Math.round(vh * scale))
 
   canvas.width = dw
   canvas.height = dh
   const ctx = canvas.getContext('2d', { willReadFrequently: true })
   if (!ctx) return null
 
-  ctx.drawImage(video, rect.x, rect.y, rect.width, rect.height, 0, 0, dw, dh)
+  ctx.drawImage(video, 0, 0, vw, vh, 0, 0, dw, dh)
   return ctx.getImageData(0, 0, dw, dh)
+}
+
+/**
+ * 1枚のコマから、本ごとの位置で切り出す。
+ *
+ * 確認が要る行に「読み取った背表紙」を出すために使う。1冊ずつ切っておくと、
+ * 候補を選ぶときに棚まで見に戻らずに済む。
+ * 切り出せなかったものは null を返す。画像が無くても一覧の作成は止めない。
+ */
+export async function cropBoxes(
+  frame: Blob,
+  boxes: readonly (BoundingBox | undefined)[],
+): Promise<(CroppedImage | null)[]> {
+  if (boxes.length === 0) return []
+  const bitmap = await createImageBitmap(frame)
+  try {
+    const canvas = document.createElement('canvas')
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return boxes.map(() => null)
+
+    const out: (CroppedImage | null)[] = []
+    for (const box of boxes) {
+      if (!box) {
+        out.push(null)
+        continue
+      }
+      const r = boxToRect(box, bitmap.width, bitmap.height)
+      canvas.width = r.width
+      canvas.height = r.height
+      ctx.drawImage(bitmap, r.x, r.y, r.width, r.height, 0, 0, r.width, r.height)
+      const blob = await canvasToBlob(canvas)
+      out.push(blob ? { blob, width: r.width, height: r.height } : null)
+    }
+    return out
+  } finally {
+    bitmap.close()
+  }
+}
+
+/** 切り出した1冊ぶんの画像 */
+export interface CroppedImage {
+  blob: Blob
+  width: number
+  height: number
 }
 
 /** canvas を Blob にする。保存と OCR の受け渡しに使う */

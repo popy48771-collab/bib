@@ -1,6 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { BookEntry, ExtractedSpine, ScoredCandidate } from './types'
-import { adoptCandidate, entriesFromExtraction, entriesFromIsbns, resolveEntries, resolveEntry } from './pipeline/stages'
+import {
+  adoptCandidate,
+  entriesFromExtraction,
+  entriesFromIsbns,
+  nearExactMatches,
+  resolveEntries,
+  resolveEntry,
+} from './pipeline/stages'
 import { spineFromText, spineRawText } from './lib/spine/parse'
 import {
   clearAll,
@@ -11,11 +18,12 @@ import {
   savePhoto,
   saveEntries,
 } from './lib/db'
-import { BookList } from './ui/BookList'
+import { BookList, needsAttention } from './ui/BookList'
 import { ExportPanel } from './ui/ExportPanel'
 import { BarcodeScanner, type ScanResult } from './ui/BarcodeScanner'
 import { SpineScanner, type SpineResult } from './ui/SpineScanner'
-import { useSpineScan, type SpineCrop } from './ui/useSpineScan'
+import { useSpineScan } from './ui/useSpineScan'
+import type { CroppedImage } from './lib/spine/capture'
 import { Notice, type NoticeKind } from './ui/Notice'
 import { useOnline } from './ui/useOnline'
 
@@ -54,7 +62,7 @@ const MODE_TEXT: Record<InputMode, { title: string; lead: string }> = {
   },
   spine: {
     title: '本棚の背表紙を読み取る',
-    lead: 'カメラを横向きにして本棚にかざし、棚に沿ってゆっくり動かしてください。画面中央の枠を通った背表紙から順に文字を読み取り、書誌情報を調べて下の一覧に並べます。',
+    lead: 'カメラを横向きにして、棚の一段が枠いっぱいに収まる距離で構え、少し止めてください。1枚から20〜30冊まとめて読み取り、書誌情報を調べて下の一覧に並べます。',
   },
 }
 
@@ -74,6 +82,9 @@ export function App() {
   const [confirmingClear, setConfirmingClear] = useState(false)
   /** バーコードで確定させようとしている行。新しい行は増やさない */
   const [rescueEntryId, setRescueEntryId] = useState<string | null>(null)
+  /** 一覧を「手を入れる必要がある行」だけに絞るか */
+  const [onlyAttention, setOnlyAttention] = useState(false)
+  const [confirmingBulk, setConfirmingBulk] = useState(false)
   const online = useOnline()
 
   /**
@@ -111,6 +122,21 @@ export function App() {
     entriesRef.current = next
     setEntries(next)
     saveEntries([entry]).catch(() =>
+      setError('この端末に保存できませんでした。空き容量を確認して、もう一度お試しください。'),
+    )
+  }, [])
+
+  /**
+   * まとめて差し替える。棚1枚ぶんを一度に確定させるときに使う。
+   * 1件ずつ upsertEntry を回すと保存の往復が件数ぶん起きる。
+   */
+  const upsertMany = useCallback((changed: BookEntry[]) => {
+    if (changed.length === 0) return
+    const byId = new Map(changed.map((e) => [e.id, e]))
+    const next = entriesRef.current.map((e) => byId.get(e.id) ?? e)
+    entriesRef.current = next
+    setEntries(next)
+    saveEntries(changed).catch(() =>
       setError('この端末に保存できませんでした。空き容量を確認して、もう一度お試しください。'),
     )
   }, [])
@@ -180,13 +206,13 @@ export function App() {
   )
 
   /**
-   * 背表紙を1冊読んだときの処理。
+   * 背表紙を1冊読んだときの処理。1枚のコマから20〜30回呼ばれる。
    *
    * sameAs が入っているときは、直前に読んだのと同じ背表紙である。
    * 行を増やさず、読みが良くなったときだけ差し替える。
    */
   const onSpine = useCallback(
-    (spine: ExtractedSpine, crop: SpineCrop, sameAs?: string): string | null => {
+    (spine: ExtractedSpine, crop: CroppedImage | null, sameAs?: string): string | null => {
       const existing = sameAs ? entriesRef.current.find((e) => e.id === sameAs) : undefined
       if (existing) {
         const observed: BookEntry = {
@@ -214,23 +240,20 @@ export function App() {
 
       const photoId = `spine-${newId()}`
       const created = entriesFromExtraction(photoId, [spine], photoId)[0]
-      const entry: BookEntry = {
-        ...created,
-        scanSessionId: sessionId,
-        visualHash: crop.hash,
-        observationCount: 1,
-      }
+      const entry: BookEntry = { ...created, scanSessionId: sessionId, observationCount: 1 }
       upsertEntry(entry)
 
       // 画像は候補を選ぶときの手掛かりとして残す。
       // 容量不足などで保存できなくても、書誌一覧の作成は止めない
-      savePhoto({
-        id: photoId,
-        blob: crop.blob,
-        width: crop.width,
-        height: crop.height,
-        createdAt: crop.at,
-      }).catch(() => undefined)
+      if (crop) {
+        savePhoto({
+          id: photoId,
+          blob: crop.blob,
+          width: crop.width,
+          height: crop.height,
+          createdAt: Date.now(),
+        }).catch(() => undefined)
+      }
 
       enqueueResolve(entry.id)
       return entry.id
@@ -277,6 +300,9 @@ export function App() {
 
   const knownIsbns = useMemo(() => new Set(scanResults.keys()), [scanResults])
   const unresolved = useMemo(() => entries.filter(isUnresolved), [entries])
+  const attentionCount = useMemo(() => entries.filter(needsAttention).length, [entries])
+  /** 書名がほぼ一致していて、まとめて確定できる件数 */
+  const bulkCount = useMemo(() => nearExactMatches(entries).length, [entries])
 
   /** 引けなかったものを引き直す。通信が一時的に落ちていた場合の受け皿 */
   const onRetry = useCallback(async () => {
@@ -326,6 +352,28 @@ export function App() {
     },
     [patchEntry],
   )
+
+  /**
+   * 書名がほぼ一致している行を、まとめて確定させる。
+   *
+   * 棚を1枚撮ると要確認が十数件まとめて出る。1行ずつ候補を押していくのは
+   * 現実的ではないので、「書名が合っている」ものを一度に引き受けられるようにする。
+   * 自動確定の条件は緩めない。これは利用者が明示的に選ぶ操作である。
+   */
+  const onAdoptMany = useCallback(() => {
+    const targets = nearExactMatches(entriesRef.current)
+    setConfirmingBulk(false)
+    if (targets.length === 0) return
+    upsertMany(
+      targets.map(({ entry, candidate }) => ({
+        ...adoptCandidate(entry, candidate),
+        status: 'confirmed' as const,
+        pinned: true,
+        conflicts: undefined,
+      })),
+    )
+    setFlash({ kind: 'success', message: `${targets.length} 件を確定しました。` })
+  }, [upsertMany])
 
   /**
    * 読み取った文字を直して引き直す。
@@ -546,7 +594,7 @@ export function App() {
                   {
                     id: 'spine' as const,
                     title: '本棚の背表紙',
-                    note: '棚にかざして流すだけで読み取ります。本を手に取る必要はありませんが、読み取れない本や、候補の確認が必要な本が出ます。',
+                    note: '棚にかざすだけで、一段ぶんをまとめて読み取ります。本を手に取る必要はありませんが、読み取れない本や、候補の確認が必要な本が出ます。',
                   },
                 ] satisfies { id: InputMode; title: string; note: string }[]
               ).map((m) => (
@@ -607,8 +655,60 @@ export function App() {
                 </Notice>
               )}
 
+              {bulkCount > 0 &&
+                (confirmingBulk ? (
+                  <div className="confirm" role="group" aria-label="まとめて確定の確認">
+                    <p>
+                      書名がほぼ一致している {bulkCount}{' '}
+                      件を、それぞれ最有力の候補で確定します。確定したものは書き出しの対象に入ります。
+                      内容が違っていた場合は、その行を削除してください。
+                    </p>
+                    <div className="actions">
+                      <button type="button" className="button button--primary" onClick={onAdoptMany}>
+                        {bulkCount} 件を確定する
+                      </button>
+                      <button
+                        type="button"
+                        className="button button--secondary"
+                        onClick={() => setConfirmingBulk(false)}
+                      >
+                        確定しない
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <Notice
+                    kind="info"
+                    title="まとめて確定できます"
+                    actions={
+                      <button
+                        type="button"
+                        className="button button--secondary"
+                        onClick={() => setConfirmingBulk(true)}
+                      >
+                        {bulkCount} 件をまとめて確定
+                      </button>
+                    }
+                  >
+                    書名がほぼ一致しているのに、著者やISBNの裏付けが取れず確定できていない本が{' '}
+                    {bulkCount} 件あります。1件ずつ確かめる代わりに、まとめて確定できます。
+                  </Notice>
+                ))}
+
+              {attentionCount > 0 && (
+                <label className="checkbox">
+                  <input
+                    type="checkbox"
+                    checked={onlyAttention}
+                    onChange={(e) => setOnlyAttention(e.target.checked)}
+                  />
+                  手を入れる必要がある {attentionCount} 件だけを表示する
+                </label>
+              )}
+
               <BookList
                 entries={entries}
+                onlyAttention={onlyAttention}
                 onAdopt={onAdopt}
                 onExclude={onExclude}
                 onRestore={onRestore}

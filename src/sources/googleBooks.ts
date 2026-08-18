@@ -141,6 +141,23 @@ export async function searchByTitle(
   return request(build(author ? `${t} ${author}` : t), opts.signal)
 }
 
+/**
+ * フリーワードで引く。
+ *
+ * `intitle:` は書名の項目に対する検索なので、OCR が読み違えると 0 件になる。
+ * こちらは全文を対象にするため当たりが広い。崩れた読み取りの受け皿。
+ */
+export async function searchByKeyword(
+  keyword: string,
+  opts: SearchOptions = {},
+): Promise<BibRecord[]> {
+  const k = tidy(keyword)
+  if (!k) return []
+  const p = new URLSearchParams({ q: k, maxResults: String(opts.maxResults ?? 10), printType: 'books' })
+  if (opts.country) p.set('country', opts.country)
+  return request(p, opts.signal)
+}
+
 /** ISBN で引く。バーコード経路と、他ソースで得た ISBN の確認に使う */
 export async function searchByIsbn(isbn: string, opts: SearchOptions = {}): Promise<BibRecord[]> {
   const v = extractIsbn13(isbn)

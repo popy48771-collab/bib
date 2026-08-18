@@ -141,11 +141,18 @@ export async function openRearCamera(): Promise<MediaStream> {
   }
 
   try {
+    /*
+     * 解像度は高めに要求する。
+     *
+     * 背表紙を棚ごと読むとき、書名の文字が何画素あるかがそのまま精度になる。
+     * 実測では、棚から少し離れた構図で 1280 は 10冊中7冊、1920 は10冊とも
+     * 読めた。対応していない端末では ideal なので自動的に落ちる。
+     */
     return await navigator.mediaDevices.getUserMedia({
       video: {
         facingMode: { ideal: 'environment' },
-        width: { ideal: 1280 },
-        height: { ideal: 720 },
+        width: { ideal: 1920 },
+        height: { ideal: 1080 },
       },
       audio: false,
     })

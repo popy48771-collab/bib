@@ -5,18 +5,16 @@ import {
   assessFrame,
   canvasToBlob,
   downscale,
-  drawLane,
+  drawFrame,
   frameAdvice,
   frameDifference,
   isUsable,
-  pickSharpest,
   toGray,
   visualHash,
-  type FrameQuality,
   type GrayImage,
 } from '../lib/spine/capture'
 import { Notice } from './Notice'
-import type { CaptureOutcome, SpineCrop } from './useSpineScan'
+import type { CaptureOutcome, FrameCapture } from './useSpineScan'
 
 /** 1冊ぶんの照合状況。スキャナはこれを表示するだけで、照合自体は関与しない */
 export interface SpineResult {
@@ -31,41 +29,37 @@ interface Props {
   preparing: boolean
   /** OCR が使えない理由 */
   ocrError: string | null
-  /** OCR 待ちの件数 */
+  /** OCR 待ちのコマ数 */
   ocrPending: number
   /** 書誌照合待ちの件数 */
   lookupPending: number
   /** OCR の待ち行列が満杯 */
   busy: boolean
-  /** 文字が取れなかった枚数 */
+  /** 背表紙を1本も取れなかったコマ数 */
   unreadable: number
   /** この読み取りで追加した本 */
   results: readonly SpineResult[]
   /** 一覧に登録済みの冊数 */
   registeredCount: number
-  /** 背表紙を1枚切り出したとき */
-  onCapture: (crop: SpineCrop) => CaptureOutcome
+  /** 棚を1枚取り込んだとき */
+  onCapture: (frame: FrameCapture) => CaptureOutcome
   onClose: () => void
   onOpenLibrary: () => void
 }
 
 /** 監視の間隔。毎コマ調べても精度は上がらず、発熱するだけ */
-const MONITOR_INTERVAL_MS = 200
+const MONITOR_INTERVAL_MS = 250
 /** 監視用に縮小する幅。品質判定と動きの検出はこの解像度で足りる */
-const MONITOR_WIDTH = 72
-/** 連写の枚数と間隔。この中から最も鮮鋭な1枚だけを OCR へ回す */
-const BURST_SIZE = 3
-const BURST_INTERVAL_MS = 60
-/** 取り込んだ直後は少し待つ。同じ背表紙で連続して撮らないため */
-const COOLDOWN_MS = 500
+const MONITOR_WIDTH = 96
 /**
- * 止まらないまま這わせている場合の受け皿。
+ * 取り込むまでに必要な「良いコマ」の連続数。
  *
- * 「静止したら撮る」だけにすると、棚に沿って途切れなく動かす人からは
- * 1枚も取り込めないことがある。品質が足りているコマがこの時間続いたら、
- * 完全に止まっていなくても取り込む。
+ * 1枚に棚一段ぶんが写るので、撮り直しの費用が高い。ぶれていない状態が
+ * 続いたことを確かめてから撮る。約 0.75 秒ぶん。
  */
-const MOTION_GRACE_MS = 2500
+const STABLE_TICKS = 3
+/** 取り込んだ直後は待つ。同じ構図で続けて撮らないため */
+const COOLDOWN_MS = 1200
 
 /** 状態表示の文言 */
 const RESULT_TEXT: Record<SpineResult['state'], string> = {
@@ -75,26 +69,27 @@ const RESULT_TEXT: Record<SpineResult['state'], string> = {
   missing: '書誌情報が見つかりませんでした',
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms))
-}
-
 /** 全体の品質判定に使う縮小画像。ラプラシアンを原寸で回すと重い */
 function monitorGray(image: ImageData): GrayImage {
   const gray = toGray(image)
-  const width = Math.min(128, gray.width)
+  const width = Math.min(160, gray.width)
   return downscale(gray, width, Math.round((gray.height * width) / gray.width))
 }
 
 /**
- * 本棚の背表紙を、かざしたまま連続で読み取る。
+ * 本棚にかざして、棚の一段ぶんをまとめて読み取る。
  *
- * 画面中央に背表紙1冊ぶんの縦長の「読取レーン」を置き、棚に沿って
- * カメラを横へ流してもらう。レーンを通過した背表紙だけを取り込むので、
- * 棚全体から背表紙の境界を検出する処理が要らない(lib/spine/capture.ts)。
+ * ── 1枚に棚一段 ─────────────────────────────────────
+ * 以前は画面中央の細い帯(読取レーン)を通った本だけを取り込んでいたが、
+ * 実測するとその帯には約5冊が入っており、混ざった画像を1冊として
+ * OCR にかけていた。いまはフレーム全体を渡し、Tesseract のレイアウト解析に
+ * 背表紙を1冊ずつの縦列へ分けさせている(lib/spine/capture.ts の冒頭)。
+ *
+ * そのため操作も変わる。棚に沿って流し続けるのではなく、
+ * **棚の一段を枠に収めて少し止める** → 読み取る → 次の段へ、という流れになる。
  *
  * OCR はこの画面では持たない。カメラを閉じた時点で Worker ごと落ちると、
- * 待ち行列に残った本が消えてしまうため、呼び出し側(useSpineScan)に置く。
+ * 待ち行列に残ったコマが消えてしまうため、呼び出し側(useSpineScan)に置く。
  *
  * 画面の並びは DESIGN_SYSTEM.md の順序に従う:
  * カメラ表示領域 → 現在の状態 → 主操作ボタン → 登録済み件数と一覧へのリンク。
@@ -114,7 +109,7 @@ export function SpineScanner({
 }: Props) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const monitorRef = useRef<HTMLCanvasElement>(null)
-  const cropRef = useRef<HTMLCanvasElement>(null)
+  const frameRef = useRef<HTMLCanvasElement>(null)
 
   const [cameraError, setCameraError] = useState<string | null>(null)
   const [ready, setReady] = useState(false)
@@ -124,10 +119,10 @@ export function SpineScanner({
   const [captured, setCaptured] = useState(0)
   const [attempt, setAttempt] = useState(0)
 
-  /** 走査ループから見た最新の onCapture。依存に入れるとカメラが開き直る */
-  const captureRef = useRef(onCapture)
+  /** 走査ループから見た最新の値。依存に入れるとカメラが開き直る */
+  const liveRef = useRef({ onCapture, busy })
   useEffect(() => {
-    captureRef.current = onCapture
+    liveRef.current = { onCapture, busy }
   })
 
   useEffect(() => {
@@ -135,45 +130,26 @@ export function SpineScanner({
     let stream: MediaStream | null = null
     let timer: ReturnType<typeof setTimeout> | undefined
     let previous: GrayImage | null = null
-    /** 品質は足りているのに静止しない状態が続いた時間 */
-    let waitingSince = 0
+    let stable = 0
 
     const schedule = (ms = MONITOR_INTERVAL_MS) => {
       if (!cancelled) timer = setTimeout(() => void tick(), ms)
     }
 
-    /** 原寸のレーンを連写して、最も鮮鋭な1枚を切り出す */
-    const grabBest = async (
+    /** 原寸のフレームを1枚切り出す */
+    const grabFrame = async (
       video: HTMLVideoElement,
       canvas: HTMLCanvasElement,
-    ): Promise<SpineCrop | null> => {
-      const frames: { image: ImageData; gray: GrayImage; quality: FrameQuality }[] = []
-      for (let i = 0; i < BURST_SIZE; i++) {
-        const image = drawLane(video, canvas)
-        if (image) {
-          const gray = monitorGray(image)
-          frames.push({ image, gray, quality: assessFrame(gray) })
-        }
-        if (i < BURST_SIZE - 1) await sleep(BURST_INTERVAL_MS)
-        if (cancelled) return null
-      }
-
-      const best = pickSharpest(frames)
-      if (!best) return null
-
-      const ctx = canvas.getContext('2d')
-      if (!ctx) return null
-      canvas.width = best.image.width
-      canvas.height = best.image.height
-      ctx.putImageData(best.image, 0, 0)
-
+    ): Promise<FrameCapture | null> => {
+      const image = drawFrame(video, canvas)
+      if (!image) return null
       const blob = await canvasToBlob(canvas)
       if (!blob) return null
       return {
         blob,
-        hash: visualHash(best.gray),
-        width: best.image.width,
-        height: best.image.height,
+        hash: visualHash(monitorGray(image)),
+        width: image.width,
+        height: image.height,
         at: Date.now(),
       }
     }
@@ -182,10 +158,10 @@ export function SpineScanner({
       if (cancelled) return
       const video = videoRef.current
       const monitor = monitorRef.current
-      const crop = cropRef.current
-      if (!video || !monitor || !crop) return schedule()
+      const frame = frameRef.current
+      if (!video || !monitor || !frame) return schedule()
 
-      const image = drawLane(video, monitor, MONITOR_WIDTH)
+      const image = drawFrame(video, monitor, MONITOR_WIDTH)
       if (!image) return schedule()
 
       const gray = toGray(image)
@@ -194,29 +170,32 @@ export function SpineScanner({
       previous = gray
 
       if (!isUsable(quality)) {
-        waitingSince = 0
+        stable = 0
         setAdvice(frameAdvice(quality))
         return schedule()
       }
       setAdvice(null)
 
-      // 静止していれば取り込む。止まらないまま時間が経った場合も取り込む
-      const now = Date.now()
+      // 動いているあいだは撮らない。棚一段ぶんの撮り直しは高くつく
       if (moved > STILL_THRESHOLD) {
-        if (waitingSince === 0) waitingSince = now
-        if (now - waitingSince < MOTION_GRACE_MS) return schedule()
+        stable = 0
+        return schedule()
       }
-      waitingSince = 0
+      stable += 1
+      if (stable < STABLE_TICKS) return schedule()
 
-      const shot = await grabBest(video, crop)
+      // 読み取りが追いついていなければ、撮らずに待つ
+      if (liveRef.current.busy) return schedule()
+
+      const shot = await grabFrame(video, frame)
       if (cancelled) return
       if (!shot) return schedule()
 
-      const outcome = captureRef.current(shot)
+      const outcome = liveRef.current.onCapture(shot)
       setLastOutcome(outcome)
       if (outcome === 'queued') setCaptured((n) => n + 1)
 
-      // 取り込んだ直後の比較対象は当てにならないので作り直させる
+      stable = 0
       previous = null
       return schedule(COOLDOWN_MS)
     }
@@ -269,7 +248,7 @@ export function SpineScanner({
   // 取り込み結果の表示を一定時間で戻す
   useEffect(() => {
     if (!lastOutcome) return
-    const t = setTimeout(() => setLastOutcome(null), 1800)
+    const t = setTimeout(() => setLastOutcome(null), 2200)
     return () => clearTimeout(t)
   }, [lastOutcome])
 
@@ -279,7 +258,7 @@ export function SpineScanner({
     setAttempt((n) => n + 1)
   }, [])
 
-  const status = describeStatus({ ready, preparing, busy, advice, lastOutcome })
+  const status = describeStatus({ ready, preparing, busy, ocrPending, advice, lastOutcome })
   const error = cameraError ?? ocrError
 
   return (
@@ -287,7 +266,7 @@ export function SpineScanner({
       {/* 3. カメラ表示領域 */}
       <div className="scanner-view scanner-view--spine">
         <video ref={videoRef} playsInline muted autoPlay />
-        {!error && ready && <div className="scanner-lane" aria-hidden="true" />}
+        {!error && ready && <div className="scanner-shelf" aria-hidden="true" />}
         {(!ready || error) && (
           <p className="scanner-placeholder">
             {error ? 'カメラを利用できません' : 'カメラを起動しています'}
@@ -297,7 +276,7 @@ export function SpineScanner({
 
       {/* 切り出し用。画面には出さないが、常に DOM に置いておく必要がある */}
       <canvas ref={monitorRef} className="visually-hidden" />
-      <canvas ref={cropRef} className="visually-hidden" />
+      <canvas ref={frameRef} className="visually-hidden" />
 
       {/* 4. 現在の状態 */}
       {error ? (
@@ -311,14 +290,14 @@ export function SpineScanner({
         </p>
       )}
 
-      {(ocrPending > 0 || lookupPending > 0 || unreadable > 0) && (
+      {(captured > 0 || ocrPending > 0 || lookupPending > 0 || unreadable > 0) && (
         <ul className="status-line">
           <li>
-            取り込み <b>{captured}</b> 枚
+            撮った枚数 <b>{captured}</b>
           </li>
           {ocrPending > 0 && (
             <li>
-              文字の読み取り待ち <b>{ocrPending}</b> 件
+              文字の読み取り待ち <b>{ocrPending}</b> 枚
             </li>
           )}
           {lookupPending > 0 && (
@@ -354,14 +333,14 @@ export function SpineScanner({
 
       {/*
         読んだ端から書名が入っていく。ボタンを押さないと結果が出ないのでは
-        「読めたのかどうか」が分からず、同じ棚を何度もなぞることになる
+        「読めたのかどうか」が分からず、同じ棚を何度も撮ることになる
       */}
       {results.length > 0 && (
         <div>
           <h2 className="subheading">この読み取りで追加した本（{results.length} 件）</h2>
           <ul className="scan-feed">
             {results
-              .slice(-6)
+              .slice(-8)
               .reverse()
               .map((r) => (
                 <li key={r.id} data-state={r.state}>
@@ -369,14 +348,14 @@ export function SpineScanner({
                   <span className="scan-feed__detail">{RESULT_TEXT[r.state]}</span>
                 </li>
               ))}
-            {results.length > 6 && <li>ほか {results.length - 6} 件</li>}
+            {results.length > 8 && <li>ほか {results.length - 8} 件</li>}
           </ul>
         </div>
       )}
 
       <p className="note">
-        カメラを横向きにして、棚の一段が上下に収まるように構えてください。
-        中央の枠に背表紙が1冊ずつ入るよう、棚に沿ってゆっくり動かします。
+        カメラを横向きにして、<b>棚の一段が枠いっぱいに収まる距離</b>で構え、少し止めてください。
+        1枚から20〜30冊まとめて読み取ります。読み取りが終わったら、次の段へ移してください。
       </p>
 
       {/* 6. 登録済み件数と一覧へのリンク */}
@@ -404,6 +383,7 @@ function describeStatus(input: {
   ready: boolean
   preparing: boolean
   busy: boolean
+  ocrPending: number
   advice: string | null
   lastOutcome: CaptureOutcome | null
 }): StatusView {
@@ -425,7 +405,7 @@ function describeStatus(input: {
     return {
       kind: 'idle',
       label: '読み取りが追いついていません',
-      detail: 'カメラを動かす速さを落としてください。取り込んだぶんは順に処理します。',
+      detail: '読み取りが終わるまでお待ちください。撮ったぶんは順に処理します。',
     }
   }
   if (input.advice) {
@@ -434,20 +414,27 @@ function describeStatus(input: {
   if (input.lastOutcome === 'queued') {
     return {
       kind: 'success',
-      label: '背表紙を取り込みました',
-      detail: '文字を読み取って書誌情報を調べています。',
+      label: '棚を1枚取り込みました',
+      detail: '文字を読み取って書誌情報を調べています。次の段へ移してください。',
     }
   }
   if (input.lastOutcome === 'duplicate') {
     return {
       kind: 'duplicate',
-      label: 'この背表紙は取り込み済みです',
-      detail: '次の本へ動かしてください。',
+      label: 'この構図は取り込み済みです',
+      detail: '次の段へ移すか、棚に沿って少しずらしてください。',
+    }
+  }
+  if (input.ocrPending > 0) {
+    return {
+      kind: 'searching',
+      label: '読み取っています',
+      detail: '次の段へ移して構いません。撮ったぶんは順に処理します。',
     }
   }
   return {
     kind: 'searching',
-    label: '背表紙を探しています',
-    detail: '中央の枠に背表紙を1冊ずつ収めてください。',
+    label: '棚を探しています',
+    detail: '棚の一段を枠に収めて、少し止めてください。',
   }
 }

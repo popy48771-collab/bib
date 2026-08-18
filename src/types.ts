@@ -212,5 +212,11 @@ export const SPINE_TITLE_EXACT = 0.95
 export const SPINE_AUTHOR_MATCH = 0.8
 /** 正規化してこの文字数に満たない読み取りは、当たっても確定させない */
 export const SPINE_MIN_QUERY_LENGTH = 4
-/** 1冊あたりの書誌API呼び出し上限。読めない本に延々と問い合わせない */
-export const SPINE_MAX_LOOKUPS = 4
+/**
+ * 1冊あたりの書誌API呼び出し上限。読めない本に延々と問い合わせない。
+ *
+ * クエリは当たりやすい順に並んでいて、当たったところで打ち切る。したがって
+ * 実際に上限まで使うのは「どのクエリでも引けなかった本」だけである。
+ * 末尾を削った前方一致まで試す余地を持たせるため、ソースあたり3回とる。
+ */
+export const SPINE_MAX_LOOKUPS = 6

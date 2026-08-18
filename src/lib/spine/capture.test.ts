@@ -9,7 +9,7 @@ import {
   frameDifference,
   hashDistance,
   isUsable,
-  laneRect,
+  boxToRect,
   looksSame,
   pickSharpest,
   sharpness,
@@ -167,18 +167,29 @@ describe('pickSharpest', () => {
   })
 })
 
-describe('laneRect', () => {
-  it('画面中央に縦長の帯を置く', () => {
-    const r = laneRect(1280, 720)
-    expect(r.width).toBe(Math.round(1280 * 0.18))
-    expect(r.height).toBe(Math.round(720 * 0.92))
-    // 左右の余りが等しい = 中央にある
-    expect(r.x).toBe(Math.round((1280 - r.width) / 2))
-    expect(1280 - (r.x + r.width)).toBe(r.x)
+describe('boxToRect', () => {
+  it('相対座標を画素へ直す', () => {
+    const r = boxToRect({ x: 0.5, y: 0.25, width: 0.1, height: 0.5 }, 1000, 800, 0)
+    expect(r).toEqual({ x: 500, y: 200, width: 100, height: 400 })
   })
 
-  it('極端に小さい映像でも 1画素は確保する', () => {
-    const r = laneRect(1, 1)
+  it('左右に余白を足す（文字ぴったりに切ると何の画像か分からない）', () => {
+    const tight = boxToRect({ x: 0.5, y: 0.25, width: 0.1, height: 0.5 }, 1000, 800, 0)
+    const padded = boxToRect({ x: 0.5, y: 0.25, width: 0.1, height: 0.5 }, 1000, 800, 0.35)
+    expect(padded.width).toBeGreaterThan(tight.width)
+    expect(padded.x).toBeLessThan(tight.x)
+  })
+
+  it('画像の外へはみ出さない', () => {
+    const r = boxToRect({ x: 0, y: 0, width: 1, height: 1 }, 640, 480, 0.5)
+    expect(r.x).toBe(0)
+    expect(r.y).toBe(0)
+    expect(r.width).toBeLessThanOrEqual(640)
+    expect(r.height).toBeLessThanOrEqual(480)
+  })
+
+  it('潰れた枠でも 1画素は確保する', () => {
+    const r = boxToRect({ x: 0.5, y: 0.5, width: 0, height: 0 }, 100, 100, 0)
     expect(r.width).toBeGreaterThanOrEqual(1)
     expect(r.height).toBeGreaterThanOrEqual(1)
   })

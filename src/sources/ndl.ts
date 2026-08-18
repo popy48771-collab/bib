@@ -185,6 +185,22 @@ export async function searchByTitle(
   return ndlRequest(fallback, opts)
 }
 
+/**
+ * 全項目のキーワードで引く。
+ *
+ * `title=` は書名の項目に対する検索なので、OCR が1文字読み違えると 0 件になる。
+ * `any=` は全項目を対象にするため当たりが広く、崩れた読み取りの受け皿になる。
+ * 代わりに雑音も増えるので、呼び出し側は必ず類似度で絞ること。
+ */
+export async function searchByKeyword(
+  keyword: string,
+  opts: NdlSearchOptions,
+): Promise<BibRecord[]> {
+  const k = tidy(keyword)
+  if (!k) return []
+  return ndlRequest(new URLSearchParams({ any: k, cnt: String(opts.maxResults ?? 10) }), opts)
+}
+
 /** ISBN で引く */
 export async function searchByIsbn(isbn: string, opts: NdlSearchOptions): Promise<BibRecord[]> {
   const v = extractIsbn13(isbn)

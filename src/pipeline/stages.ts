@@ -404,7 +404,13 @@ export function queriesForEntry(entry: BookEntry): SpineQuery[] {
   })
   if (queries.length > 0) return queries
   // 断片が1つも残らない(手入力が空など)場合の受け皿
-  return [{ title: entry.extracted.title || entry.rawText, authors: entry.extracted.authors }]
+  return [
+    {
+      title: entry.extracted.title || entry.rawText,
+      authors: entry.extracted.authors,
+      mode: 'title' as const,
+    },
+  ]
 }
 
 /**
@@ -464,6 +470,15 @@ export interface SpineEvidence {
   titleExact: boolean
   /** 著者も一致した */
   authorMatch: boolean
+  /**
+   * 別のコマから独立にもう一度読んで、同じ ISBN に着地した。
+   *
+   * 棚を少しずつずらして撮ると、同じ本が複数のコマに写る。別々の画像から
+   * 別々のノイズを経て同じ書誌へ当たったなら、それは1つのDBの高得点より強い。
+   * 実測では著者名が崩れやすく、著者一致だけを頼りにすると確定がほとんど
+   * 出ないので、この根拠で埋める。
+   */
+  repeatedObservation: boolean
   /** ソースどうしが別の本(別の版)を最上位に返した */
   disagreement: boolean
   /** 照合に使えた文字数。短すぎる読みは当たっても確定させない */
@@ -514,10 +529,19 @@ export function collectSpineEvidence(
     gbTop.record.isbn13 !== ndlTop.record.isbn13 &&
     titleSimilarity(gbTop.record.title, ndlTop.record.title) >= 0.8
 
+  // 前回の観測で着地した ISBN。今回も同じところへ来たかを見る
+  const priorIsbn = entry.resolved?.isbn13
+  const repeatedObservation =
+    (entry.observationCount ?? 1) >= 2 &&
+    !!priorIsbn &&
+    !!top.record.isbn13 &&
+    priorIsbn === top.record.isbn13
+
   return {
     isbnAgreement,
     titleExact,
     authorMatch,
+    repeatedObservation,
     disagreement,
     queryLength: Math.max(...queries.map((q) => normalizeForMatch(q.title).length), 0),
   }
@@ -530,13 +554,19 @@ export function collectSpineEvidence(
  * 誤った本を確定一覧へ混ぜない。したがって確定は
  *   - 複数ソースが同じ ISBN を指した
  *   - 書名がほぼ完全一致し、著者も一致した
- * の2つに限り、それ以外は人間の確認へ回す。
+ *   - 書名がほぼ完全一致し、別のコマからも同じ ISBN に着地した
+ * の3つに限り、それ以外は人間の確認へ回す。
+ *
+ * 3つ目はいずれも「書名がほぼ完全一致」を必須にしてある。再観測だけを
+ * 根拠にすると、OCR が同じ読み違えを繰り返したときに誤りを確定させてしまう。
  */
 export function statusFromEvidence(ev: SpineEvidence): BookEntry['status'] {
   if (ev.queryLength < SPINE_MIN_QUERY_LENGTH) return 'needsReview'
   if (ev.isbnAgreement) return 'confirmed'
   if (ev.disagreement) return 'conflict'
   if (ev.titleExact && ev.authorMatch) return 'confirmed'
+  // 書名がほぼ完全一致していて、別のコマからも同じ本に着地した
+  if (ev.titleExact && ev.repeatedObservation) return 'confirmed'
   return 'needsReview'
 }
 
@@ -580,6 +610,57 @@ export function mergeSpineResult(
 }
 
 /**
+ * 1つのクエリを1つのソースへ投げる。
+ *
+ * `any` は全項目のキーワード検索。書名の項目で引くと OCR の読み違いで
+ * 0 件になるので、最後の総当たりとしてこちらへ落とす。
+ */
+async function runQuery(source: TitleSource, q: SpineQuery, ctx: StageContext): Promise<BibRecord[]> {
+  if (source === 'ndl') {
+    const opts = { proxyUrl: NDL_PROXY_URL, signal: ctx.signal }
+    return q.mode === 'any'
+      ? ndl.searchByKeyword(q.title, opts)
+      : ndl.searchByTitle(q.title, q.authors, opts)
+  }
+  const opts = { country: GOOGLE_BOOKS_COUNTRY, signal: ctx.signal }
+  return q.mode === 'any'
+    ? googleBooks.searchByKeyword(q.title, opts)
+    : googleBooks.searchByTitle(q.title, q.authors, opts)
+}
+
+/**
+ * 「書名がほぼ一致しているのに確定できていない」行を集める。
+ *
+ * 棚を1枚撮ると20〜30冊が一度に入り、そのうち相当数が要確認で残る。
+ * 中身を見ると、書名は完全に一致していて、著者が読めなかっただけ、
+ * というものが多い。自動では確定させない（1ソースの高得点は根拠にならない）が、
+ * 利用者がまとめて引き受けられるようにしておく。
+ *
+ * 判定は書名だけで行う。スコアは著者や出版社の一致でも上下するので、
+ * 「書名が合っている」という利用者が確かめたい一点で選び分ける。
+ */
+export function nearExactMatches(
+  entries: readonly BookEntry[],
+): { entry: BookEntry; candidate: ScoredCandidate }[] {
+  const out: { entry: BookEntry; candidate: ScoredCandidate }[] = []
+  for (const entry of entries) {
+    if (entry.status !== 'needsReview' || entry.pinned) continue
+    const top = [...(entry.candidates.googleBooks ?? []), ...(entry.candidates.ndl ?? [])].sort(
+      (a, b) => b.score - a.score,
+    )[0]
+    if (!top) continue
+
+    const queries = queriesForEntry(entry)
+    if (Math.max(...queries.map((q) => normalizeForMatch(q.title).length), 0) < SPINE_MIN_QUERY_LENGTH)
+      continue
+    if (!queries.some((q) => titleSimilarity(q.title, top.record.title) >= SPINE_TITLE_EXACT)) continue
+
+    out.push({ entry, candidate: top })
+  }
+  return out
+}
+
+/**
  * 書名で照合する。
  *
  * ── 検索順を言語で変える ──────────────────────────────
@@ -602,24 +683,22 @@ async function resolveByTitle(entry: BookEntry, ctx: StageContext): Promise<Book
   const perSource = Math.max(1, Math.ceil(SPINE_MAX_LOOKUPS / order.length))
   const bySource: Partial<Record<TitleSource, ScoredCandidate[]>> = {}
 
+  /*
+   * 予算の最後の1回は、必ず一番当たりの広いクエリに使う。
+   *
+   * クエリは絞りが強い順に並んでいるので、素直に上から使うと予算が
+   * 絞り込みだけで尽き、総当たりまで届かない。頭から数件と、末尾の1件を撃つ。
+   */
+  const attempts =
+    queries.length <= perSource
+      ? queries
+      : [...queries.slice(0, perSource - 1), queries[queries.length - 1]]
+
   for (const source of order) {
     const records: BibRecord[] = []
-    let budget = perSource
-    for (const q of queries) {
-      if (budget <= 0) break
-      budget--
+    for (const q of attempts) {
       try {
-        const got =
-          source === 'ndl'
-            ? await ndl.searchByTitle(q.title, q.authors, {
-                proxyUrl: NDL_PROXY_URL,
-                signal: ctx.signal,
-              })
-            : await googleBooks.searchByTitle(q.title, q.authors, {
-                country: GOOGLE_BOOKS_COUNTRY,
-                signal: ctx.signal,
-              })
-        records.push(...got)
+        records.push(...(await runQuery(source, q, ctx)))
       } catch (err) {
         rethrowAbort(err)
       }

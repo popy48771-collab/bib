@@ -1,22 +1,21 @@
 /**
  * OCR の出力を「照合できる形」に均す
  *
- * 背表紙には書名・著者・出版社が同じ面に並んでいるだけで、どの行が何かは
- * 印刷の上に書いていない。OCR もそれを教えてくれない。
- * したがって「1行=書名」と決め打って検索すると、著者名や出版社名で
- * 書誌DBを引くことになり、まず当たらない。
+ * 1枚のコマには棚一段ぶんの背表紙が写っている。読み取り機構はそれを縦の列
+ * (SpineColumn) に分けて返してくるので、ここでは
  *
- * ここでは
- *  - 行を洗う(OCR が撒く記号と、日本語行に紛れ込む空白を落とす)
- *  - それらしい役割を当てる(出版社・著者は形で見当が付く)
- *  - 1冊につき複数の検索クエリへ展開する
- * までをやる。役割の推定は外れても構わない。外れた場合の受け皿として
- * 「全文で引く」クエリを必ず残してある。
+ *  1. 列を「書名・著者・出版社」の塊へ切り分ける（文字の縦の空きで切る）
+ *  2. 塊を洗う（OCR が撒く記号と、日本語行に紛れ込む空白を落とす）
+ *  3. それらしい役割を当てる（出版社・著者は形で見当が付く）
+ *  4. 1冊につき複数の検索クエリへ展開する
+ *
+ * をやる。役割の推定は外れても構わない。外れた場合の受け皿として
+ * 「全文で引く」クエリと「末尾を削った前方一致」を必ず残してある。
  */
 
 import type { ExtractedSpine, OcrFragment } from '../../types'
 import { normalizeForMatch, tidy } from '../normalize'
-import type { SpineRecognition } from './recognizer'
+import type { SpineColumn, SpineRecognition } from './recognizer'
 
 /** 日本語(漢字・かな)を含むか。書誌ソースの当てる順を決めるのに使う */
 export function hasJapanese(text: string): boolean {
@@ -106,32 +105,109 @@ export function cleanFragments(fragments: readonly OcrFragment[]): OcrFragment[]
   return out
 }
 
-/**
- * 書名らしさ。信頼度が高く、長い行を上位に置く。
- * 背表紙で最も大きく刷られているのは書名なので、OCR も長く読める。
- */
-function titleScore(f: OcrFragment): number {
-  const lengthWeight = 0.4 + 0.6 * Math.min(1, f.text.length / 10)
-  return f.confidence * lengthWeight
+// ───────────────────────────────────────────────────────────
+// 列を塊へ切り分ける
+// ───────────────────────────────────────────────────────────
+
+/** 縦の空きがこの倍率を超えたら、別の塊とみなす */
+const GAP_RATIO = 2
+/** 空きが小さすぎるときの下限。文字の高さに対する割合 */
+const MIN_GAP_RATIO = 0.35
+
+function median(values: number[]): number {
+  if (values.length === 0) return 0
+  const sorted = [...values].sort((a, b) => a - b)
+  return sorted[Math.floor(sorted.length / 2)]
 }
 
 /**
- * 読み取り結果から ExtractedSpine を作る。
- * 使える行が1つも無ければ null(＝読めず)。
+ * 1本の列を、書名・著者・出版社といった塊へ切り分ける。
+ *
+ * 背表紙では、書名と著者のあいだに文字何個ぶんかの空きがある。OCR は
+ * 列全体を1行として返してくる（「思考の整理学外山滋比古ちくま文庫」）ので、
+ * このままでは書名で引けない。語の位置を見て、大きな空きで切る。
+ *
+ * 語の枠は重なって返ってくることがあるため、走査済みの下端を持ち回って
+ * 「重なり＝空きなし」として扱う。切れなかった場合は列全体で1つの塊になる
+ * （その場合は末尾を削った前方一致の検索が受け皿になる）。
  */
-export function spineFromRecognition(
-  rec: SpineRecognition,
-  engine: ExtractedSpine['engine'] = 'tesseract',
+export function splitColumn(words: readonly OcrFragment[]): OcrFragment[] {
+  const placed = words.filter((w) => w.box)
+  if (placed.length < 2) {
+    const text = words.map((w) => w.text).join('')
+    if (!text) return []
+    const confidence = words.reduce((a, w) => a + w.confidence, 0) / Math.max(1, words.length)
+    return [{ text, confidence, box: words[0]?.box }]
+  }
+
+  const sorted = [...placed].sort((a, b) => a.box!.y - b.box!.y)
+  const gaps: number[] = []
+  let bottom = sorted[0].box!.y + sorted[0].box!.height
+  for (let i = 1; i < sorted.length; i++) {
+    const gap = sorted[i].box!.y - bottom
+    if (gap > 0) gaps.push(gap)
+    bottom = Math.max(bottom, sorted[i].box!.y + sorted[i].box!.height)
+  }
+  const heights = sorted.map((w) => w.box!.height)
+  const threshold = Math.max(median(gaps) * GAP_RATIO, median(heights) * MIN_GAP_RATIO)
+
+  const chunks: OcrFragment[][] = [[sorted[0]]]
+  bottom = sorted[0].box!.y + sorted[0].box!.height
+  for (let i = 1; i < sorted.length; i++) {
+    const w = sorted[i]
+    if (w.box!.y - bottom > threshold) chunks.push([w])
+    else chunks[chunks.length - 1].push(w)
+    bottom = Math.max(bottom, w.box!.y + w.box!.height)
+  }
+
+  return chunks.map((chunk) => {
+    const top = Math.min(...chunk.map((w) => w.box!.y))
+    const bot = Math.max(...chunk.map((w) => w.box!.y + w.box!.height))
+    const left = Math.min(...chunk.map((w) => w.box!.x))
+    const right = Math.max(...chunk.map((w) => w.box!.x + w.box!.width))
+    return {
+      text: chunk.map((w) => w.text).join(''),
+      confidence: chunk.reduce((a, w) => a + w.confidence, 0) / chunk.length,
+      box: { x: left, y: top, width: right - left, height: bot - top },
+    }
+  })
+}
+
+/**
+ * 書名らしさ。
+ *
+ *  - 背表紙で最も大きく刷られているのは書名なので、OCR も長く読める
+ *  - そして**日本語の背表紙では、書名は上に刷られている**。著者はその下、
+ *    出版社は一番下。長さだけで選ぶと、著者名が書名より長い本
+ *    （「罪と罰 中」/「ドストエフスキー」）で必ず外す
+ *
+ * 塊は読み順（上から下）に並んでいるので、位置は添字で足りる。
+ */
+function titleScore(f: OcrFragment, index: number): number {
+  const lengthWeight = 0.4 + 0.6 * Math.min(1, f.text.length / 10)
+  const positionWeight = 1 / (1 + index * 0.6)
+  return f.confidence * lengthWeight * positionWeight
+}
+
+/** 塊の並びから1冊ぶんを組み立てる。使える塊が無ければ null */
+function spineFromFragments(
+  fragments: OcrFragment[],
+  confidence: number,
+  engine: ExtractedSpine['engine'],
+  box?: ExtractedSpine['box'],
 ): ExtractedSpine | null {
-  const fragments = cleanFragments(rec.fragments.length > 0 ? rec.fragments : fragmentsFromText(rec.rawText))
-  if (fragments.length === 0) return null
+  const clean = cleanFragments(fragments)
+  if (clean.length === 0) return null
 
-  const publisherLine = fragments.find((f) => looksLikePublisher(f.text))
-  const rest = fragments.filter((f) => f !== publisherLine)
+  const publisherLine = clean.find((f) => looksLikePublisher(f.text))
+  const rest = clean.filter((f) => f !== publisherLine)
 
-  // 書名は「残りのうち最も書名らしい行」。著者候補も書名になりうるので、
-  // ここでは著者らしさで除外しない(1行しか読めなかった場合に何も残らなくなる)
-  const titleFragment = [...rest].sort((a, b) => titleScore(b) - titleScore(a))[0] ?? fragments[0]
+  // 書名は「残りのうち最も書名らしい塊」。著者候補も書名になりうるので、
+  // ここでは著者らしさで除外しない(1つしか読めなかった場合に何も残らなくなる)
+  const titleFragment =
+    [...rest]
+      .map((f, i) => ({ f, score: titleScore(f, clean.indexOf(f) >= 0 ? clean.indexOf(f) : i) }))
+      .sort((a, b) => b.score - a.score)[0]?.f ?? clean[0]
 
   const authors = rest
     .filter((f) => f !== titleFragment && looksLikeAuthor(f.text))
@@ -142,13 +218,36 @@ export function spineFromRecognition(
     title: titleFragment.text,
     authors,
     publisher: publisherLine ? tidy(publisherLine.text) : undefined,
-    confidence: rec.confidence,
-    fragments,
+    confidence,
+    fragments: clean,
     engine,
+    box,
   }
 }
 
-/** 改行区切りのテキストを断片にする。手入力の修正と、行情報の無い OCR 用 */
+/**
+ * 1枚のコマの読み取り結果から、背表紙を1冊ずつ取り出す。
+ *
+ * 列の1つが背表紙1冊に対応する。読めなかった列は落とす。
+ */
+export function spinesFromRecognition(
+  rec: SpineRecognition,
+  engine: ExtractedSpine['engine'] = 'tesseract',
+): ExtractedSpine[] {
+  const out: ExtractedSpine[] = []
+  for (const column of rec.columns) {
+    const spine = spineFromFragments(splitColumn(column.words), column.confidence, engine, column.box)
+    if (spine) out.push(spine)
+  }
+  return out
+}
+
+/** 列の中身をつないだ文字列。追跡（同じ背表紙かどうか）の照合キーに使う */
+export function columnText(column: SpineColumn): string {
+  return column.words.map((w) => w.text).join('')
+}
+
+/** 改行区切りのテキストを断片にする。手入力の修正用 */
 export function fragmentsFromText(text: string, confidence = 1): OcrFragment[] {
   return text
     .split(/\r?\n/)
@@ -157,24 +256,21 @@ export function fragmentsFromText(text: string, confidence = 1): OcrFragment[] {
     .map((line) => ({ text: line, confidence }))
 }
 
+/** 利用者が手で直した文字列から作る。信頼度は満点だが、確定はさせない */
+export function spineFromText(text: string): ExtractedSpine | null {
+  return spineFromFragments(fragmentsFromText(text), 1, 'manual')
+}
+
 /**
- * 背表紙1冊ぶんの生テキスト。読めた行を印刷どおりの並びで残す。
+ * 背表紙1冊ぶんの生テキスト。読めた塊を印刷どおりの並びで残す。
  *
- * 役割の推定(どれが書名でどれが著者か)は外れることがある。行の並びを
+ * 役割の推定(どれが書名でどれが著者か)は外れることがある。並びを
  * 保っておけば、照合側は複数のクエリへ展開し直せるし、利用者が
  * 読み取り文字を直すときも、背表紙と見比べられる形で出せる。
  */
 export function spineRawText(spine: ExtractedSpine): string {
   if (spine.fragments?.length) return spine.fragments.map((f) => f.text).join('\n')
   return [spine.title, ...spine.authors, spine.publisher ?? ''].filter(Boolean).join(' ')
-}
-
-/** 利用者が手で直した文字列から作る。信頼度は満点だが、確定はさせない */
-export function spineFromText(text: string): ExtractedSpine | null {
-  return spineFromRecognition(
-    { rawText: text, fragments: fragmentsFromText(text), confidence: 1, orientation: 'unknown' },
-    'manual',
-  )
 }
 
 // ───────────────────────────────────────────────────────────
@@ -184,22 +280,36 @@ export function spineFromText(text: string): ExtractedSpine | null {
 export interface SpineQuery {
   title: string
   authors: string[]
+  /**
+   * 引き方。
+   *  - `title` … 書名の項目で引く。精度は高いが、1文字違うと 0 件になる
+   *  - `any`   … 全項目のキーワードで引く。当たりは広いが雑音も増える
+   */
+  mode: 'title' | 'any'
 }
+
+/** 末尾を削った前方一致を作るときの、最短の長さ */
+const MIN_PREFIX_LENGTH = 4
 
 /**
  * 1冊ぶんの検索クエリを、当たりやすい順に組み立てる。
  *
- * 背表紙は「書名」「副題」「著者」「出版社」が別々の行に割れて出てくる。
- * 最有力行だけで引くと、副題が本題として刷られている本や、書名が2行に
+ * 背表紙は「書名」「副題」「著者」「出版社」が別々の塊に割れて出てくる。
+ * 最有力の塊だけで引くと、副題が本題として刷られている本や、書名が2つに
  * 割れている本を取り逃がす。かといって全文で引くと出版社名がノイズになる。
  * どちらか一方に賭けず、精度の高い順に並べて上から試す。
  *
- *  1. 最有力行 + 著者          … 最も絞れる
- *  2. 最有力行と隣の行を連結    … 書名が2行に割れた場合の受け皿
- *  3. 出版社を除いた全行        … 役割の推定を外した場合の受け皿
- *  4. OCR 全文                  … 最後の総当たり
+ *  1. 最有力の塊 + 著者        … 最も絞れる
+ *  2. 末尾を1文字削った前方一致 … 実測で最も多い崩れ方の受け皿
+ *  3. 隣を連結 / 出版社を除く   … 役割の推定を外した場合の受け皿
+ *  4. 全塊をキーワードで        … 項目を限定しない
+ *  5. 半分まで削った頭を全項目で … 文字列も項目も一番広い。最後の受け皿
  *
- * 同じ文字列になったものは落とす。呼び出し側は上限件数で切ること。
+ * 並びは「効く見込みが高い順」ではなく「絞りが強い順」にしてある。
+ * 呼び出し側は上から数件と**最後の1件**を撃つので、最も絞れるものと
+ * 最も当たりが広いものの両方が必ず試される。
+ *
+ * 同じ文字列になったものは落とす。
  */
 export function buildQueries(spine: ExtractedSpine): SpineQuery[] {
   const fragments = spine.fragments ?? []
@@ -207,14 +317,25 @@ export function buildQueries(spine: ExtractedSpine): SpineQuery[] {
   const nonPublisher = fragments.filter((f) => !looksLikePublisher(f.text)).map((f) => f.text)
 
   const queries: SpineQuery[] = []
-  const push = (title: string, authors: string[]) => {
+  const push = (title: string, authors: string[], mode: SpineQuery['mode'] = 'title') => {
     const t = tidy(title)
-    if (t) queries.push({ title: t, authors })
+    if (t) queries.push({ title: t, authors, mode })
   }
 
   push(spine.title, spine.authors)
 
-  // 最有力行の隣。断片は読み取り順に並んでいるので、その前後を見る
+  /*
+   * 末尾を削る。
+   *
+   * 実測では「文化政策の現在」が「文化政策の現不」、「宮沢賢治」が
+   * 「宮沢忠治」のように、末尾や途中の1文字が崩れる。書名の項目で
+   * 引いていると、これだけで 0 件になる。
+   * 前方一致なら、崩れた文字より手前だけで引ける。
+   */
+  const head = tidy(spine.title)
+  if (head.length > MIN_PREFIX_LENGTH + 1) push(head.slice(0, head.length - 1), [])
+
+  // 最有力の塊の隣。断片は読み取り順に並んでいるので、その前後を見る
   const at = lines.indexOf(spine.title)
   if (at >= 0) {
     const after = lines[at + 1]
@@ -224,12 +345,29 @@ export function buildQueries(spine: ExtractedSpine): SpineQuery[] {
   }
 
   if (nonPublisher.length > 1) push(nonPublisher.join(' '), [])
-  if (lines.length > 1) push(lines.join(' '), [])
+
+  // 全項目のキーワードとして引く。書名の項目に縛られない受け皿
+  if (lines.length > 0) push(lines.join(' '), [], 'any')
+
+  /*
+   * 最後の受け皿。半分まで削った頭を、全項目のキーワードで引く。
+   *
+   * 塊の切り分けに失敗すると、書名に出版社まで繋がったものが出る
+   * （「文化政策の現東京大学出版会」）。書名は上に刷られているので、
+   * こういう塊でも**頭のほうは書名**である。
+   *
+   * 文字列も項目も、ここが一番広い。呼び出し側はこの1件を必ず撃つので、
+   * 絞り込みで全部外した本にも当たりの目が残る。
+   */
+  if (head.length > MIN_PREFIX_LENGTH + 1) {
+    const shorter = Math.max(MIN_PREFIX_LENGTH, Math.floor(head.length * 0.5))
+    if (shorter < head.length - 1) push(head.slice(0, shorter), [], 'any')
+  }
 
   const seen = new Set<string>()
   return queries.filter((q) => {
-    const key = `${normalizeForMatch(q.title)}|${q.authors.map(normalizeForMatch).join(',')}`
-    if (!key || seen.has(key)) return false
+    const key = `${q.mode}|${normalizeForMatch(q.title)}|${q.authors.map(normalizeForMatch).join(',')}`
+    if (!normalizeForMatch(q.title) || seen.has(key)) return false
     seen.add(key)
     return true
   })

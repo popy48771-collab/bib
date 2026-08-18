@@ -1,15 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ExtractedSpine } from '../types'
+import { cropBoxes, type CroppedImage } from '../lib/spine/capture'
 import { SerialQueue } from '../lib/spine/queue'
 import { SpineTracker } from '../lib/spine/tracker'
-import { spineFromRecognition } from '../lib/spine/parse'
+import { spineRawText, spinesFromRecognition } from '../lib/spine/parse'
 import { createTesseractRecognizer } from '../lib/spine/tesseract'
 import { SpineRecognizerUnavailableError, type SpineRecognizer } from '../lib/spine/recognizer'
 
-/** レーンから切り出した背表紙1枚 */
-export interface SpineCrop {
+/** 取り込んだコマ1枚。棚一段ぶんの背表紙が写っている */
+export interface FrameCapture {
   blob: Blob
-  /** 見た目の簡易ハッシュ。連続コマ由来の重複を弾くのに使う */
+  /** 見た目の簡易ハッシュ。同じ構図を何度も読み直さないために使う */
   hash: string
   width: number
   height: number
@@ -23,10 +24,11 @@ export type CaptureOutcome = 'queued' | 'duplicate' | 'busy' | 'unavailable'
 /**
  * OCR の待ち行列の上限。
  *
- * 溢れたら「少しゆっくり動かしてください」と伝える。無制限に溜めると
- * 端末の記憶域を食い潰すうえ、カメラを閉じてから何分も処理が続く。
+ * 1枚に棚一段ぶんが写っており、読み取りは端末によって数秒から十数秒かかる。
+ * 溜め込むと、カメラを閉じてから何分も処理が続くことになる。
+ * 溢れたら「少し待ってください」と伝える。
  */
-const OCR_QUEUE_CAPACITY = 8
+const OCR_QUEUE_CAPACITY = 3
 
 export interface SpineScanState {
   /** wasm と言語モデルを取りに行っている */
@@ -35,11 +37,11 @@ export interface SpineScanState {
   ready: boolean
   /** OCR が使えない理由。ある場合は読み取りを続けても意味がない */
   error: string | null
-  /** OCR 待ちの件数 */
+  /** OCR 待ちのコマ数 */
   pending: number
   /** 待ち行列が満杯 */
   busy: boolean
-  /** 文字が取れなかった枚数 */
+  /** 背表紙を1本も取れなかったコマの数 */
   unreadable: number
 }
 
@@ -47,31 +49,25 @@ export interface UseSpineScanOptions {
   /** カメラが動いているあいだ true。false になっても待ち行列は捌き切る */
   active: boolean
   /**
-   * 1冊ぶん読めたときに呼ばれる。
+   * 背表紙を1冊読めたときに呼ばれる。1枚のコマから何度も呼ばれる。
    *
    * `sameAs` が入っているときは、直前に読んだのと同じ背表紙である。
    * 呼び出し側は新しい行を作らず、その行に足すこと。
    * 戻り値には、実際に使った行のID を返す(追跡に使う)。
    */
-  onSpine: (spine: ExtractedSpine, crop: SpineCrop, sameAs?: string) => string | null
-}
-
-/** 追跡に使う文字列。読めた行を全部つないだもの */
-function textKeyOf(spine: ExtractedSpine): string {
-  const lines = spine.fragments?.map((f) => f.text) ?? [spine.title, ...spine.authors]
-  return lines.join(' ')
+  onSpine: (spine: ExtractedSpine, crop: CroppedImage | null, sameAs?: string) => string | null
 }
 
 /**
  * 背表紙の読み取り(OCR)を回す。
  *
  * カメラ画面(SpineScanner)からは切り離してある。カメラを閉じた時点で
- * Worker ごと落としてしまうと、待ち行列に残った本が消える。
+ * Worker ごと落としてしまうと、待ち行列に残ったコマが消える。
  * ここは画面の外に置き、待ち行列を捌き終えてから Worker を破棄する。
  */
 export function useSpineScan({ active, onSpine }: UseSpineScanOptions): {
   state: SpineScanState
-  capture: (crop: SpineCrop) => CaptureOutcome
+  capture: (frame: FrameCapture) => CaptureOutcome
 } {
   const [preparing, setPreparing] = useState(false)
   const [ready, setReady] = useState(false)
@@ -140,41 +136,58 @@ export function useSpineScan({ active, onSpine }: UseSpineScanOptions): {
     }
   }, [active])
 
-  const capture = useCallback((crop: SpineCrop): CaptureOutcome => {
+  const capture = useCallback((frame: FrameCapture): CaptureOutcome => {
     const queue = queueRef.current
     const recognizer = recognizerRef.current
     if (!queue || !recognizer) return 'unavailable'
 
     const tracker = trackerRef.current
-    // OCR にかける前の重複抑止。同じ背表紙をレーンに置き続けても1回で済む
-    if (!tracker.shouldCapture(crop.hash, crop.at)) return 'duplicate'
+    // 同じ構図を撮り続けても、読み直しは1回で済ませる
+    if (!tracker.shouldCapture(frame.hash, frame.at)) return 'duplicate'
     if (queue.isFull) return 'busy'
-    tracker.noteCapture(crop.hash, crop.at)
+    tracker.noteCapture(frame.hash, frame.at)
 
     const queued = queue.push(async () => {
-      let spine: ExtractedSpine | null = null
+      let spines: ExtractedSpine[]
       try {
-        spine = spineFromRecognition(await recognizer.recognize(crop.blob))
+        const rec = await recognizer.recognize(frame.blob, {
+          width: frame.width,
+          height: frame.height,
+        })
+        spines = spinesFromRecognition(rec)
       } catch (err) {
-        // 1枚の失敗を他の本へ波及させない。使えない状態なら理由を出す
+        // 1枚の失敗を他のコマへ波及させない。使えない状態なら理由を出す
         if (err instanceof SpineRecognizerUnavailableError) setError(err.message)
         return
       }
 
-      if (!spine) {
+      if (spines.length === 0) {
         setUnreadable((n) => n + 1)
         return
       }
 
-      const key = textKeyOf(spine)
-      /*
-       * OCR 後の重複抑止。文字列が十分似ていれば同じ背表紙の複数観測とみなす。
-       * 突き合わせる相手は「直近に読んだ何冊か」で、時間では切らない
-       * (理由は lib/spine/tracker.ts の冒頭)。記録には取り込んだ時刻を渡す。
-       */
-      const same = tracker.findSame(key)
-      const entryId = onSpineRef.current(spine, crop, same?.entryId)
-      if (entryId) tracker.note(entryId, key, crop.at)
+      // 確認用の画像を1冊ずつ切り出す。失敗しても一覧の作成は止めない
+      let crops: (CroppedImage | null)[] = spines.map(() => null)
+      try {
+        crops = await cropBoxes(
+          frame.blob,
+          spines.map((s) => s.box),
+        )
+      } catch {
+        /* 画像が無くても書名は出せる */
+      }
+
+      for (const [i, spine] of spines.entries()) {
+        /*
+         * OCR 後の重複抑止。文字列が十分似ていれば同じ背表紙の複数観測とみなす。
+         * 突き合わせる相手は「直近に読んだ何冊か」で、時間では切らない
+         * (理由は lib/spine/tracker.ts の冒頭)。記録には取り込んだ時刻を渡す。
+         */
+        const key = spineRawText(spine)
+        const same = tracker.findSame(key)
+        const entryId = onSpineRef.current(spine, crops[i] ?? null, same?.entryId)
+        if (entryId) tracker.note(entryId, key, frame.at)
+      }
     })
 
     return queued ? 'queued' : 'busy'
