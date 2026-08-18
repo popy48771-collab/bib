@@ -158,6 +158,30 @@ describe('splitColumn', () => {
     expect(splitColumn(words).map((f) => f.text)).toEqual(['思考の整理学'])
   })
 
+  it('y が下から上へ並ぶ列でも、読み順を壊さない', () => {
+    /*
+     * 実測: Tesseract の縦書きは、読み順どおりに語を返しながら
+     * その y が下から上へ並ぶことがある。y の昇順に直すと
+     * 「人間失格」が「失格間人」になった。
+     */
+    const words: OcrFragment[] = [
+      { text: '人', confidence: 0.9, box: { x: 0.5, y: 0.85, width: 0.02, height: 0.05 } },
+      { text: '間', confidence: 0.9, box: { x: 0.5, y: 0.75, width: 0.02, height: 0.05 } },
+      { text: '失格', confidence: 0.9, box: { x: 0.5, y: 0.54, width: 0.02, height: 0.1 } },
+    ]
+    expect(splitColumn(words).map((f) => f.text).join('')).toBe('人間失格')
+  })
+
+  it('y が下から上へ並ぶ列でも、大きな空きでは分ける', () => {
+    const words: OcrFragment[] = [
+      { text: '書名', confidence: 0.9, box: { x: 0.5, y: 0.8, width: 0.02, height: 0.05 } },
+      { text: 'で', confidence: 0.9, box: { x: 0.5, y: 0.74, width: 0.02, height: 0.05 } },
+      { text: 'す', confidence: 0.9, box: { x: 0.5, y: 0.68, width: 0.02, height: 0.05 } },
+      { text: '著者', confidence: 0.9, box: { x: 0.5, y: 0.2, width: 0.02, height: 0.05 } },
+    ]
+    expect(splitColumn(words).map((f) => f.text)).toEqual(['書名です', '著者'])
+  })
+
   it('位置が無ければ1つの塊にまとめる', () => {
     const out = splitColumn([
       { text: '文化政策', confidence: 0.9 },

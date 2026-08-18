@@ -4,6 +4,7 @@ import {
   STILL_THRESHOLD,
   assessFrame,
   canvasToBlob,
+  decideCapture,
   downscale,
   drawFrame,
   frameAdvice,
@@ -13,6 +14,7 @@ import {
   visualHash,
   type GrayImage,
 } from '../lib/spine/capture'
+import { segmentSpines } from '../lib/spine/segment'
 import { Notice } from './Notice'
 import { signalHit } from './feedback'
 import { describeCloseHint, describeSpineStatus } from './spineStatus'
@@ -51,17 +53,23 @@ interface Props {
 
 /** 監視の間隔。毎コマ調べても精度は上がらず、発熱するだけ */
 const MONITOR_INTERVAL_MS = 250
-/** 監視用に縮小する幅。品質判定と動きの検出はこの解像度で足りる */
-const MONITOR_WIDTH = 96
 /**
- * 取り込むまでに必要な「良いコマ」の連続数。
+ * 監視用に縮小する幅。
  *
- * 1枚に棚一段ぶんが写るので、撮り直しの費用が高い。ぶれていない状態が
- * 続いたことを確かめてから撮る。約 0.75 秒ぶん。
+ * 96 では棚の背表紙の境目が数画素に潰れ、鮮鋭度が実際より低く出ていた。
+ * 「かざしても何も起きない」の一因なので、判定できるところまで戻す。
+ * 4回/秒で 160×90 なら発熱の心配はない。
  */
-const STABLE_TICKS = 3
+const MONITOR_WIDTH = 160
 /** 取り込んだ直後は待つ。同じ構図で続けて撮らないため */
 const COOLDOWN_MS = 1200
+/**
+ * 短冊を求めるときの幅。
+ *
+ * 縦の境界を探すだけなので原寸は要らない。480 あれば、文庫の背表紙
+ * （画面幅の約2%）でも 10画素ぶんの幅がある。
+ */
+const SEGMENT_WIDTH = 480
 
 /** 状態表示の文言 */
 const RESULT_TEXT: Record<SpineResult['state'], string> = {
@@ -116,6 +124,8 @@ export function SpineScanner({
   const [cameraError, setCameraError] = useState<string | null>(null)
   const [ready, setReady] = useState(false)
   const [advice, setAdvice] = useState<string | null>(null)
+  /** 品質は足りているが、まだ止まっていない */
+  const [moving, setMoving] = useState(false)
   /** 直近の取り込み結果。一定時間で消す */
   const [lastOutcome, setLastOutcome] = useState<CaptureOutcome | null>(null)
   const [captured, setCaptured] = useState(0)
@@ -133,26 +143,53 @@ export function SpineScanner({
     let timer: ReturnType<typeof setTimeout> | undefined
     let previous: GrayImage | null = null
     let stable = 0
+    /** この待ちが始まった時刻。救済までの経過を測るのに使う */
+    let waitingSince = Date.now()
+    /** 待っているあいだに見た最良の鮮鋭度 */
+    let bestSharpness = 0
 
     const schedule = (ms = MONITOR_INTERVAL_MS) => {
       if (!cancelled) timer = setTimeout(() => void tick(), ms)
     }
 
-    /** 原寸のフレームを1枚切り出す */
+    /** 次の1枚を待つ状態へ戻す */
+    const restartWait = () => {
+      stable = 0
+      previous = null
+      waitingSince = Date.now()
+      bestSharpness = 0
+    }
+
+    /**
+     * 原寸のフレームを1枚切り出し、背表紙ごとの短冊も求める。
+     *
+     * 短冊をここで求めるのは、原寸の ImageData がまだ手元にあるからである。
+     * あとから Blob を復号し直すと、1枚につき数MBの往復が増える。
+     */
     const grabFrame = async (
       video: HTMLVideoElement,
       canvas: HTMLCanvasElement,
+      quality: ReturnType<typeof assessFrame>,
     ): Promise<FrameCapture | null> => {
       const image = drawFrame(video, canvas)
       if (!image) return null
       const blob = await canvasToBlob(canvas)
       if (!blob) return null
+
+      const gray = toGray(image)
+      const small = downscale(
+        gray,
+        SEGMENT_WIDTH,
+        Math.round((gray.height * SEGMENT_WIDTH) / gray.width),
+      )
       return {
         blob,
         hash: visualHash(monitorGray(image)),
         width: image.width,
         height: image.height,
         at: Date.now(),
+        bands: segmentSpines(small),
+        quality,
       }
     }
 
@@ -170,26 +207,41 @@ export function SpineScanner({
       const quality = assessFrame(gray)
       const moved = previous ? frameDifference(previous, gray) : 1
       previous = gray
+      if (quality.sharpness > bestSharpness) bestSharpness = quality.sharpness
 
-      if (!isUsable(quality)) {
+      const decision = decideCapture({
+        usable: isUsable(quality),
+        moved,
+        stable,
+        waitedMs: Date.now() - waitingSince,
+        sharpness: quality.sharpness,
+        bestSharpness,
+      })
+
+      if (decision === 'reject') {
         stable = 0
+        setMoving(false)
         setAdvice(frameAdvice(quality))
         return schedule()
       }
       setAdvice(null)
 
-      // 動いているあいだは撮らない。棚一段ぶんの撮り直しは高くつく
-      if (moved > STILL_THRESHOLD) {
-        stable = 0
+      if (decision === 'wait') {
+        stable = moved <= STILL_THRESHOLD ? stable + 1 : 0
+        /*
+         * 動きで待たせているあいだ、以前は何も言っていなかった。
+         * 画質は足りているので「読み取れる状態ではありません」も出ず、
+         * 利用者からは「かざしているのに何も起きない」ように見える。
+         */
+        setMoving(true)
         return schedule()
       }
-      stable += 1
-      if (stable < STABLE_TICKS) return schedule()
+      setMoving(false)
 
       // 読み取りが追いついていなければ、撮らずに待つ
       if (liveRef.current.busy) return schedule()
 
-      const shot = await grabFrame(video, frame)
+      const shot = await grabFrame(video, frame, quality)
       if (cancelled) return
       if (!shot) return schedule()
 
@@ -201,8 +253,7 @@ export function SpineScanner({
         setCaptured((n) => n + 1)
       }
 
-      stable = 0
-      previous = null
+      restartWait()
       return schedule(COOLDOWN_MS)
     }
 
@@ -272,6 +323,7 @@ export function SpineScanner({
     lookupPending,
     captured,
     advice,
+    moving,
     lastOutcome,
   })
   const closeHint = describeCloseHint({ ocrPending, lookupPending, captured })

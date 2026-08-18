@@ -16,6 +16,7 @@
 import type { ExtractedSpine, OcrFragment } from '../../types'
 import { normalizeForMatch, tidy } from '../normalize'
 import type { SpineColumn, SpineRecognition } from './recognizer'
+import { readsDownward } from './segment'
 
 /** 日本語(漢字・かな)を含むか。書誌ソースの当てる順を決めるのに使う */
 export function hasJapanese(text: string): boolean {
@@ -140,24 +141,38 @@ export function splitColumn(words: readonly OcrFragment[]): OcrFragment[] {
     return [{ text, confidence, box: words[0]?.box }]
   }
 
-  const sorted = [...placed].sort((a, b) => a.box!.y - b.box!.y)
+  /*
+   * 並べ直す向きは、返ってきた順が示す向きに合わせる。
+   *
+   * Tesseract の縦書きは、読み順どおりに語を返しながら、その y が
+   * 下から上へ並ぶことがある（segment.ts の readsDownward）。
+   * 一律に y の昇順へ直すと、そういう列だけ語順が壊れる
+   * （実測で「人間失格」が「失格間人」になった）。
+   */
+  const downward = readsDownward(placed)
+  /** 読み進む向きを常に「増える方向」にした座標。空きの計算はこちらで行う */
+  const head = (w: OcrFragment): number =>
+    downward ? w.box!.y : -(w.box!.y + w.box!.height)
+  const tail = (w: OcrFragment): number => head(w) + w.box!.height
+
+  const sorted = [...placed].sort((a, b) => head(a) - head(b))
   const gaps: number[] = []
-  let bottom = sorted[0].box!.y + sorted[0].box!.height
+  let bottom = tail(sorted[0])
   for (let i = 1; i < sorted.length; i++) {
-    const gap = sorted[i].box!.y - bottom
+    const gap = head(sorted[i]) - bottom
     if (gap > 0) gaps.push(gap)
-    bottom = Math.max(bottom, sorted[i].box!.y + sorted[i].box!.height)
+    bottom = Math.max(bottom, tail(sorted[i]))
   }
   const heights = sorted.map((w) => w.box!.height)
   const threshold = Math.max(median(gaps) * GAP_RATIO, median(heights) * MIN_GAP_RATIO)
 
   const chunks: OcrFragment[][] = [[sorted[0]]]
-  bottom = sorted[0].box!.y + sorted[0].box!.height
+  bottom = tail(sorted[0])
   for (let i = 1; i < sorted.length; i++) {
     const w = sorted[i]
-    if (w.box!.y - bottom > threshold) chunks.push([w])
+    if (head(w) - bottom > threshold) chunks.push([w])
     else chunks[chunks.length - 1].push(w)
-    bottom = Math.max(bottom, w.box!.y + w.box!.height)
+    bottom = Math.max(bottom, tail(w))
   }
 
   return chunks.map((chunk) => {

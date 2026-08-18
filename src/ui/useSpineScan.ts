@@ -1,9 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ExtractedSpine } from '../types'
-import { cropBoxes, type CroppedImage } from '../lib/spine/capture'
+import {
+  cropBoxes,
+  cropStrips,
+  type CroppedImage,
+  type FrameQuality,
+  type SpineStrip,
+} from '../lib/spine/capture'
+import { spineDiagnostics } from '../lib/spine/diagnostics'
 import { SerialQueue } from '../lib/spine/queue'
+import { toFrameColumns, type SpineBand } from '../lib/spine/segment'
 import { SpineTracker } from '../lib/spine/tracker'
-import { spineRawText, spinesFromRecognition } from '../lib/spine/parse'
+import { columnText, spineRawText, spinesFromRecognition } from '../lib/spine/parse'
 import { createTesseractRecognizer } from '../lib/spine/tesseract'
 import { SpineRecognizerUnavailableError, type SpineRecognizer } from '../lib/spine/recognizer'
 
@@ -16,6 +24,15 @@ export interface FrameCapture {
   height: number
   /** 取り込んだ時刻 (ms) */
   at: number
+  /**
+   * 背表紙ごとの短冊（0..1 の x 範囲）。
+   *
+   * 取り込んだ時点で求めておく。ここで求めるのは、原寸の ImageData が
+   * まだ手元にあるからで、あとから Blob を復号し直すのは無駄が大きい。
+   */
+  bands: SpineBand[]
+  /** 取り込んだときの品質。診断でしか使わない */
+  quality?: FrameQuality
 }
 
 /** 取り込みの結果。スキャナ側の状態表示に使う */
@@ -29,6 +46,14 @@ export type CaptureOutcome = 'queued' | 'duplicate' | 'busy' | 'unavailable'
  * 溢れたら「少し待ってください」と伝える。
  */
 const OCR_QUEUE_CAPACITY = 3
+
+/**
+ * 短冊で読むために必要な本数。
+ *
+ * 1本しか取れなかったコマは、背表紙の境界が写っていない（棚を大きく外した、
+ * 1冊だけ大写しになっている）ということなので、コマ全体の読み取りへ退避する。
+ */
+const MIN_STRIPS = 2
 
 export interface SpineScanState {
   /** wasm と言語モデルを取りに行っている */
@@ -60,6 +85,14 @@ export interface UseSpineScanOptions {
 
 /**
  * 背表紙の読み取り(OCR)を回す。
+ *
+ * ── 短冊1本ずつ読み、読めた端から一覧へ出す ─────────────
+ * 以前はコマ1枚をまるごと OCR にかけ、読み終えてから 20〜30冊ぶんを
+ * 一度に渡していた。**最初の1冊が出るまで十数秒**かかり、そのあいだ
+ * 画面は無言だったので、利用者には壊れているのと区別がつかなかった。
+ *
+ * いまは背表紙ごとの短冊に切り、1本読むごとに `onSpine` を呼ぶ。
+ * 総時間は変わらないが、1冊目は 1 秒足らずで出る。
  *
  * カメラ画面(SpineScanner)からは切り離してある。カメラを閉じた時点で
  * Worker ごと落としてしまうと、待ち行列に残ったコマが消える。
@@ -147,47 +180,115 @@ export function useSpineScan({ active, onSpine }: UseSpineScanOptions): {
     if (queue.isFull) return 'busy'
     tracker.noteCapture(frame.hash, frame.at)
 
+    /**
+     * 1冊ぶんを一覧へ渡す。
+     *
+     * 短冊を読むたびに呼ぶので、行は1冊ずつ増える。重複抑止（同じ背表紙を
+     * 別のコマから読んだ場合）はここで通す。突き合わせる相手は
+     * 「直近に読んだ何冊か」で、時間では切らない(lib/spine/tracker.ts の冒頭)。
+     */
+    const emit = (spine: ExtractedSpine, crop: CroppedImage | null): void => {
+      const key = spineRawText(spine)
+      const same = tracker.findSame(key)
+      const entryId = onSpineRef.current(spine, crop, same?.entryId)
+      if (entryId) tracker.note(entryId, key, frame.at)
+    }
+
     const queued = queue.push(async () => {
-      let spines: ExtractedSpine[]
-      try {
-        const rec = await recognizer.recognize(frame.blob, {
-          width: frame.width,
-          height: frame.height,
-        })
-        spines = spinesFromRecognition(rec)
-      } catch (err) {
-        // 1枚の失敗を他のコマへ波及させない。使えない状態なら理由を出す
-        if (err instanceof SpineRecognizerUnavailableError) setError(err.message)
-        return
+      const startedAt = Date.now()
+      const diagnosticId = spineDiagnostics.begin(frame)
+      spineDiagnostics.update(diagnosticId, { bands: frame.bands, preview: frame.blob })
+      let produced = 0
+
+      // ── 本筋: 背表紙ごとの短冊を1本ずつ読む ──────────────
+      if (frame.bands.length >= MIN_STRIPS) {
+        let strips: SpineStrip[] = []
+        try {
+          strips = await cropStrips(frame.blob, frame.bands)
+        } catch {
+          // 切り出せなければコマ全体へ退避する。読み取り自体は諦めない
+        }
+
+        for (const [index, strip] of strips.entries()) {
+          const stripStartedAt = Date.now()
+          let spines: ExtractedSpine[] = []
+          let raw = ''
+          try {
+            const rec = await recognizer.recognizeColumn(strip.image, {
+              width: strip.width,
+              height: strip.height,
+            })
+            raw = rec.columns.map(columnText).join(' / ')
+            // 短冊の中の位置を、コマ全体の位置へ直してから組み立てる
+            spines = spinesFromRecognition({
+              ...rec,
+              columns: toFrameColumns(rec.columns, strip.band),
+            })
+          } catch (err) {
+            if (err instanceof SpineRecognizerUnavailableError) {
+              setError(err.message)
+              return
+            }
+            // 1本の失敗を他の短冊へ波及させない
+          }
+
+          spineDiagnostics.addStrip(diagnosticId, {
+            index,
+            band: strip.band,
+            text: raw,
+            spines: spines.length,
+            ms: Date.now() - stripStartedAt,
+            image: strip.image,
+          })
+
+          for (const spine of spines) {
+            produced++
+            // 確認用は短冊そのもの。短冊1本が背表紙1冊にあたる
+            emit(spine, strip.preview)
+          }
+        }
       }
 
-      if (spines.length === 0) {
-        setUnreadable((n) => n + 1)
-        return
+      /*
+       * ── 退避: コマ全体を読む ───────────────────────────
+       * 短冊に切れなかった構図（棚を大きく外した、1冊だけ大写し）と、
+       * 切れてはいたが1本も読めなかった場合の受け皿。
+       * 極性の混在には弱いが、以前はこれだけで動いていた経路なので残す。
+       */
+      if (produced === 0) {
+        spineDiagnostics.update(diagnosticId, { mode: 'frame' })
+        let spines: ExtractedSpine[] = []
+        try {
+          const rec = await recognizer.recognize(frame.blob, {
+            width: frame.width,
+            height: frame.height,
+          })
+          spines = spinesFromRecognition(rec)
+        } catch (err) {
+          if (err instanceof SpineRecognizerUnavailableError) setError(err.message)
+          spines = []
+        }
+
+        if (spines.length > 0) {
+          // 確認用の画像を1冊ずつ切り出す。失敗しても一覧の作成は止めない
+          let crops: (CroppedImage | null)[] = spines.map(() => null)
+          try {
+            crops = await cropBoxes(
+              frame.blob,
+              spines.map((s) => s.box),
+            )
+          } catch {
+            /* 画像が無くても書名は出せる */
+          }
+          for (const [i, spine] of spines.entries()) {
+            produced++
+            emit(spine, crops[i] ?? null)
+          }
+        }
       }
 
-      // 確認用の画像を1冊ずつ切り出す。失敗しても一覧の作成は止めない
-      let crops: (CroppedImage | null)[] = spines.map(() => null)
-      try {
-        crops = await cropBoxes(
-          frame.blob,
-          spines.map((s) => s.box),
-        )
-      } catch {
-        /* 画像が無くても書名は出せる */
-      }
-
-      for (const [i, spine] of spines.entries()) {
-        /*
-         * OCR 後の重複抑止。文字列が十分似ていれば同じ背表紙の複数観測とみなす。
-         * 突き合わせる相手は「直近に読んだ何冊か」で、時間では切らない
-         * (理由は lib/spine/tracker.ts の冒頭)。記録には取り込んだ時刻を渡す。
-         */
-        const key = spineRawText(spine)
-        const same = tracker.findSame(key)
-        const entryId = onSpineRef.current(spine, crops[i] ?? null, same?.entryId)
-        if (entryId) tracker.note(entryId, key, frame.at)
-      }
+      spineDiagnostics.update(diagnosticId, { spines: produced, ms: Date.now() - startedAt })
+      if (produced === 0) setUnreadable((n) => n + 1)
     })
 
     return queued ? 'queued' : 'busy'

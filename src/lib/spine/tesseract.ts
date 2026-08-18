@@ -1,10 +1,14 @@
 /**
  * Tesseract.js による背表紙OCR
  *
- * ── 1枚のコマから何冊も取る ───────────────────────────
- * 棚一段が写ったコマをそのまま渡すと、Tesseract のレイアウト解析が
- * 背表紙を縦の列に分けて返してくる。列の1つが背表紙1冊に対応する。
- * 背表紙の境界を自前で検出する必要がないので、OpenCV.js は要らない。
+ * ── 短冊1本 = 背表紙1冊 ──────────────────────────────
+ * 主な入口は `recognizeColumn`（短冊1本）である。呼び出し側が
+ * segment.ts で背表紙ごとに切り、極性を揃えてから渡してくる。
+ *
+ * かつては棚一段のコマをそのまま渡し、Tesseract のレイアウト解析に
+ * 列へ分けさせていた。**実機で全滅した。** ページ単位の二値化では、
+ * 白抜き文字と黒文字が混在する棚のどちらかが必ず潰れるためである。
+ * `recognize`（コマ全体）は、短冊が2本も取れなかったときの退避に残してある。
  *
  * 位置(bbox)も返ってくるので、確認用に1冊ぶんを切り出せる。
  *
@@ -26,6 +30,7 @@
  */
 
 import { rotateBlob } from './capture'
+import { mergeStripColumns } from './segment'
 import {
   EMPTY_RECOGNITION,
   SpineRecognizerUnavailableError,
@@ -91,6 +96,57 @@ type Page = import('tesseract.js/dist/tesseract.esm.min.js').TesseractPage
 /** 資産の置き場。GitHub Pages ではリポジトリ名がパスに入るので BASE_URL を通す */
 function langPath(): string {
   return `${import.meta.env.BASE_URL}ocr/lang`
+}
+
+/** gzip の魔法数 */
+const GZIP_MAGIC = [0x1f, 0x8b]
+
+/**
+ * 言語モデルが圧縮されたまま届くかを、先頭2バイトで確かめる。
+ *
+ * モデルは `.gz` のまま置き、Tesseract に展開させている。ところが配信側が
+ * `Content-Encoding: gzip` を付けると、ブラウザが先に展開してしまい、
+ * Tesseract が二重に展開しようとして**OCR の初期化ごと失敗する**。
+ * GitHub Pages は付けない想定だが、この環境から公開URLへ到達できず
+ * 確認できていない。決め打ちにせず、実物の先頭を見て決める。
+ *
+ * 取得に失敗したときは、どの資産で失敗したかが分かる形で投げ直す。
+ * 「読み込めませんでした」だけでは、次に何を確認すればよいか判らない。
+ */
+async function detectGzip(base: string): Promise<boolean> {
+  const url = `${base}/${LANGS.split('+')[0]}.traineddata.gz`
+  let response: Response
+  try {
+    // 先頭だけで足りる。3.4MB を丸ごと取りに行かない
+    response = await fetch(url, { headers: { Range: 'bytes=0-1' } })
+  } catch (err) {
+    throw new Error(
+      `言語モデル（${url}）を取得できませんでした` +
+        (err instanceof Error ? `（${err.message}）` : ''),
+    )
+  }
+  if (!response.ok) {
+    throw new Error(`言語モデル（${url}）を取得できませんでした（HTTP ${response.status}）`)
+  }
+
+  const head = await readHead(response, 2)
+  return head[0] === GZIP_MAGIC[0] && head[1] === GZIP_MAGIC[1]
+}
+
+/**
+ * 応答の先頭 n バイトだけ読む。
+ *
+ * Range が無視される配信でも、本体を最後まで落とさずに済ませる。
+ */
+async function readHead(response: Response, n: number): Promise<Uint8Array> {
+  const reader = response.body?.getReader?.()
+  if (!reader) return new Uint8Array((await response.arrayBuffer()).slice(0, n))
+  try {
+    const { value } = await reader.read()
+    return (value ?? new Uint8Array()).slice(0, n)
+  } finally {
+    void reader.cancel().catch(() => undefined)
+  }
 }
 
 /**
@@ -161,19 +217,43 @@ export function createTesseractRecognizer(): SpineRecognizer {
 
   async function start(): Promise<Worker> {
     // 資産の URL は Vite に解決させる。?url なのでコードは取り込まれない
-    const [tesseract, workerUrl, coreUrl] = await Promise.all([
-      import('tesseract.js/dist/tesseract.esm.min.js').then((m) => m.default),
-      import('tesseract.js/dist/worker.min.js?url').then((m) => m.default),
-      import('tesseract.js-core/tesseract-core-simd-lstm.wasm.js?url').then((m) => m.default),
-    ])
+    let tesseract: typeof import('tesseract.js/dist/tesseract.esm.min.js').default
+    let workerUrl: string
+    let coreUrl: string
+    try {
+      ;[tesseract, workerUrl, coreUrl] = await Promise.all([
+        import('tesseract.js/dist/tesseract.esm.min.js').then((m) => m.default),
+        import('tesseract.js/dist/worker.min.js?url').then((m) => m.default),
+        import('tesseract.js-core/tesseract-core-simd-lstm.wasm.js?url').then((m) => m.default),
+      ])
+    } catch (err) {
+      throw new Error(
+        '読み取りプログラム（Worker と wasm）を取得できませんでした' +
+          (err instanceof Error ? `（${err.message}）` : ''),
+      )
+    }
 
-    const created = await tesseract.createWorker(LANGS, OEM_LSTM_ONLY, {
-      workerPath: workerUrl,
-      corePath: coreUrl,
-      langPath: langPath(),
-      // 言語モデルは .gz で置いてある(3.4MB → 転送量を半分以下に抑える)
-      gzip: true,
-    })
+    const base = langPath()
+    const gzip = await detectGzip(base)
+
+    let created: Worker
+    try {
+      created = await tesseract.createWorker(LANGS, OEM_LSTM_ONLY, {
+        workerPath: workerUrl,
+        corePath: coreUrl,
+        langPath: base,
+        /*
+         * 言語モデルは .gz で置いてある(3.4MB → 転送量を半分以下に抑える)。
+         * ただし配信側が展開して返してくることがあるので、実物を見て決める。
+         */
+        gzip,
+      })
+    } catch (err) {
+      throw new Error(
+        `言語モデル（${base}/${LANGS.split('+').join('・')}）を読み込めませんでした` +
+          (err instanceof Error ? `（${err.message}）` : ''),
+      )
+    }
 
     // 解像度をこちらで宣言しておく。指定しないと毎回推定して警告を吐く
     await created.setParameters({ user_defined_dpi: '300' })
@@ -203,6 +283,50 @@ export function createTesseractRecognizer(): SpineRecognizer {
   return {
     async prepare() {
       await ensure()
+    },
+
+    async recognizeColumn(image, size, options) {
+      const w = await ensure()
+
+      // 1周目は縦書き。日本語の背表紙はこれが基本
+      await w.setParameters({ tessedit_pageseg_mode: PSM_VERTICAL_BLOCK })
+      const page = (await w.recognize(image, undefined, OUTPUT)).data
+      const columns = mergeStripColumns(columnsOf(page, size, 0))
+      if (columns.length > 0) {
+        return {
+          columns,
+          confidence: Math.max(0, Math.min(1, (page.confidence ?? 0) / 100)),
+          orientation: 'vertical',
+        }
+      }
+      if (options?.rotate === false) return EMPTY_RECOGNITION
+
+      /*
+       * 縦書きで1文字も取れなかった短冊だけ、回して読み直す。
+       *
+       * コマ全体を回すのと違い、短冊1本の往復は安い。洋書は上から下と
+       * 下から上の両方があり、事前には判らないので両方向を試す。
+       */
+      for (const rotate of [3, 1] as const) {
+        let target: Blob
+        try {
+          target = await rotateBlob(image, rotate)
+        } catch {
+          continue
+        }
+        const rotatedSize = { width: size.height, height: size.width }
+        await w.setParameters({ tessedit_pageseg_mode: PSM_BLOCK })
+        const rotatedPage = (await w.recognize(target, undefined, OUTPUT)).data
+        const rotatedColumns = mergeStripColumns(columnsOf(rotatedPage, rotatedSize, rotate))
+        if (rotatedColumns.length > 0) {
+          return {
+            columns: rotatedColumns,
+            confidence: Math.max(0, Math.min(1, (rotatedPage.confidence ?? 0) / 100)),
+            orientation: 'horizontal',
+          }
+        }
+      }
+      return EMPTY_RECOGNITION
     },
 
     async recognize(image, size) {

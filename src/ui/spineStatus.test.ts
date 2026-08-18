@@ -78,6 +78,24 @@ describe('describeSpineStatus — 使えない理由を先に出す', () => {
     expect(s.kind).toBe('success')
     expect(s.label).toContain('取り込みました')
   })
+
+  it('動きで撮れていないときは、止めるように言う', () => {
+    // 黙って待たせると「かざしているのに何も起きない」ように見える
+    const s = describeSpineStatus(input({ moving: true }))
+    expect(s.label).toContain('動いています')
+    expect(s.detail).toContain('止めてください')
+  })
+
+  it('画質が足りない理由は、動きより先に出す', () => {
+    const s = describeSpineStatus(input({ moving: true, advice: '棚が暗すぎます。' }))
+    expect(s.detail).toBe('棚が暗すぎます。')
+  })
+
+  it('取り込めた直後は、動いていても取り込めたことを優先する', () => {
+    // 次の段へ移し始めた瞬間に「動いています」へ変わると、撮れたのか判らない
+    const s = describeSpineStatus(input({ captured: 1, moving: true, lastOutcome: 'queued' }))
+    expect(s.label).toContain('取り込みました')
+  })
 })
 
 describe('describeCloseHint — 押していいのかに答える', () => {

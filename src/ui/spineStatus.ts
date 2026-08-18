@@ -29,6 +29,13 @@ export interface SpineStatusInput {
   captured: number
   /** 画質が足りない理由。無ければ null */
   advice: string | null
+  /**
+   * 画質は足りているが、まだカメラが止まっていない。
+   *
+   * ここを黙っていると、利用者からは「かざしているのに何も起きない」に見える
+   * （実機でそう報告された）。撮れない理由は必ず文にする。
+   */
+  moving?: boolean
   /** 直近の取り込み結果 */
   lastOutcome: 'queued' | 'duplicate' | 'busy' | 'unavailable' | null
 }
@@ -85,6 +92,14 @@ export function describeSpineStatus(input: SpineStatusInput): SpineStatusView {
       kind: 'success',
       label: '棚を1枚取り込みました',
       detail: '読み取っています。次の段へ移して構いません。',
+      settled: false,
+    }
+  }
+  if (input.moving) {
+    return {
+      kind: 'idle',
+      label: 'カメラが動いています',
+      detail: 'カメラを止めてください。止まると自動で読み取ります。',
       settled: false,
     }
   }
