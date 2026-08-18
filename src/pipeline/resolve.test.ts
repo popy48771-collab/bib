@@ -9,6 +9,7 @@ import * as googleBooks from '../sources/googleBooks'
 import * as ndl from '../sources/ndl'
 import * as openbd from '../sources/openbd'
 import { entriesFromExtraction, entriesFromIsbns, resolveEntries, resolveEntry } from './stages'
+import { spineDiagnostics } from '../lib/spine/diagnostics'
 
 const ISBN = '9784873115658'
 
@@ -198,6 +199,41 @@ describe('resolveEntry — 書名経路', () => {
 
     expect(resolved.status).not.toBe('confirmed')
     expect(ndl.searchByTitle).toHaveBeenCalled()
+  })
+
+  /**
+   * 実機診断(?debug=1)が有効なあいだは、照合のリクエストと着地点が残る。
+   * 「読めても書誌が引けない」の原因(中継の失敗・0件・例外)は、
+   * 画面からはここでしか区別できない。
+   */
+  it('診断が有効なら、照合のリクエストと失敗の理由を記録する', async () => {
+    vi.mocked(googleBooks.searchByTitle).mockResolvedValue([googleHit])
+    vi.mocked(ndl.searchByTitle).mockRejectedValue(new Error('NDLサーチ APIエラー: 403'))
+
+    spineDiagnostics.setEnabled(true)
+    try {
+      await resolveEntry(spineEntry())
+
+      const lookups = spineDiagnostics.listLookups()
+      expect(lookups.length).toBeGreaterThan(0)
+      expect(lookups.some((l) => l.source === 'googleBooks' && (l.hits ?? 0) > 0)).toBe(true)
+      expect(lookups.some((l) => l.source === 'ndl' && l.error?.includes('403'))).toBe(true)
+
+      const resolutions = spineDiagnostics.listResolutions()
+      expect(resolutions).toHaveLength(1)
+      expect(resolutions[0].topTitle).toBe('リーダブルコード')
+    } finally {
+      spineDiagnostics.setEnabled(false)
+    }
+  })
+
+  it('診断が無効なら何も記録しない(通常の利用に影響させない)', async () => {
+    vi.mocked(googleBooks.searchByTitle).mockResolvedValue([googleHit])
+
+    await resolveEntry(spineEntry())
+
+    expect(spineDiagnostics.listLookups()).toEqual([])
+    expect(spineDiagnostics.listResolutions()).toEqual([])
   })
 })
 

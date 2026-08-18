@@ -67,6 +67,69 @@ describe('SpineDiagnosticsLog', () => {
   })
 })
 
+describe('書誌照合の記録', () => {
+  const lookup = {
+    at: 1_700_000_000_000,
+    entryText: '思考の整理学',
+    source: 'ndl' as const,
+    query: '思考の整理学',
+    mode: 'title' as const,
+    hits: 1,
+    ms: 320,
+  }
+
+  it('無効なあいだは何も記録しない', () => {
+    const log = new SpineDiagnosticsLog()
+    log.addLookup(lookup)
+    log.addResolution({ at: 0, entryText: 'x', status: 'notFound' })
+    expect(log.listLookups()).toEqual([])
+    expect(log.listResolutions()).toEqual([])
+  })
+
+  it('リクエストと着地点を記録し、clear で消える', () => {
+    const log = new SpineDiagnosticsLog()
+    log.setEnabled(true)
+    log.addLookup(lookup)
+    log.addLookup({ ...lookup, source: 'googleBooks', hits: undefined, error: 'TypeError: Failed to fetch' })
+    log.addResolution({
+      at: 1_700_000_001_000,
+      entryText: '思考の整理学',
+      status: 'confirmed',
+      topTitle: '思考の整理学',
+      topIsbn: '9784480020475',
+      topScore: 0.95,
+    })
+
+    expect(log.listLookups()).toHaveLength(2)
+    expect(log.listLookups()[1].error).toContain('Failed to fetch')
+    expect(log.listResolutions()[0].status).toBe('confirmed')
+
+    log.clear()
+    expect(log.listLookups()).toEqual([])
+    expect(log.listResolutions()).toEqual([])
+  })
+
+  it('無効に戻すと記録を捨てる', () => {
+    const log = new SpineDiagnosticsLog()
+    log.setEnabled(true)
+    log.addLookup(lookup)
+    log.setEnabled(false)
+    expect(log.listLookups()).toEqual([])
+  })
+
+  it('購読者へ変更を伝える', () => {
+    const log = new SpineDiagnosticsLog()
+    log.setEnabled(true)
+    let calls = 0
+    log.subscribe(() => {
+      calls++
+    })
+    log.addLookup(lookup)
+    log.addResolution({ at: 0, entryText: 'x', status: 'notFound' })
+    expect(calls).toBe(2)
+  })
+})
+
 describe('buildReport', () => {
   const frames: FrameDiagnostic[] = [
     {
@@ -105,5 +168,28 @@ describe('buildReport', () => {
 
   it('時刻は読める形にする', () => {
     expect(buildReport(frames, 0).generatedAt).toBe('1970-01-01T00:00:00.000Z')
+  })
+
+  it('照合の記録も書き出しに含める', () => {
+    const report = buildReport(
+      frames,
+      0,
+      [
+        {
+          at: 0,
+          entryText: '思考の整理学',
+          source: 'ndl',
+          query: '思考の整理学',
+          mode: 'title',
+          error: 'Error: NDLサーチ APIエラー: 403',
+          ms: 120,
+        },
+      ],
+      [{ at: 0, entryText: '思考の整理学', status: 'notFound' }],
+    )
+    expect(report.lookups).toHaveLength(1)
+    expect(report.lookups[0].error).toContain('403')
+    expect(report.lookups[0].at).toBe('1970-01-01T00:00:00.000Z')
+    expect(report.resolutions[0].status).toBe('notFound')
   })
 })

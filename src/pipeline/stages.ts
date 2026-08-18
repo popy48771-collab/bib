@@ -42,6 +42,26 @@ import {
 import * as googleBooks from '../sources/googleBooks'
 import * as ndl from '../sources/ndl'
 import * as openbd from '../sources/openbd'
+import { spineDiagnostics } from '../lib/spine/diagnostics'
+
+/*
+ * ── 実機診断への記録 ─────────────────────────────────
+ * `?debug=1` のときだけ、書誌照合のリクエストを1件ずつ診断ログへ残す。
+ * 実機では「読めない」と「読めても引けない」が重なって報告され、後者は
+ * 画面に「見つからず」としか出ない。中継の403・0件・例外を区別するには
+ * ここで残すしかない。無効のあいだは何もしない(spineDiagnostics 側で即返る)。
+ */
+
+/** 診断に出す1行ぶんの見出し。長い rawText は先頭だけで判別できる */
+function diagnosticText(entry: BookEntry): string {
+  return entry.rawText.replace(/\s+/g, ' ').slice(0, 40)
+}
+
+/** 例外を診断に残せる文字列にする */
+function describeError(err: unknown): string {
+  if (err instanceof Error) return `${err.name}: ${err.message}`.slice(0, 200)
+  return String(err).slice(0, 200)
+}
 
 /**
  * フィールドを型を保ったまま代入する。
@@ -351,34 +371,57 @@ async function resolveByIsbn(
   ctx: StageContext,
 ): Promise<BookEntry> {
   let current = entry
+  const text = diagnosticText(entry)
+  /*
+   * current は attempt のクロージャの中で書き換わる。素の比較で書くと
+   * TypeScript が「confirmed になりえない」と絞り込んだまま戻さないので、
+   * 判定は関数を通す。
+   */
+  const settled = (e: BookEntry): boolean => e.status === 'confirmed'
 
-  try {
-    const hit = (await openbd.fetchByIsbns([isbn13], ctx.signal)).get(isbn13)
-    if (hit) return mergeIsbnResult(current, isbn13, [{ record: hit, score: 1 }], 'openbd')
-  } catch (err) {
-    rethrowAbort(err)
+  /** ソース1回ぶんを診断に残しながら実行する。失敗は飲む(中断だけ抜かす) */
+  const attempt = async (
+    source: 'openbd' | 'googleBooks' | 'ndl',
+    run: () => Promise<number>,
+  ): Promise<void> => {
+    const startedAt = Date.now()
+    try {
+      const hits = await run()
+      spineDiagnostics.addLookup({
+        at: startedAt, entryText: text, source, query: isbn13, mode: 'isbn', hits,
+        ms: Date.now() - startedAt,
+      })
+    } catch (err) {
+      rethrowAbort(err)
+      spineDiagnostics.addLookup({
+        at: startedAt, entryText: text, source, query: isbn13, mode: 'isbn',
+        error: describeError(err), ms: Date.now() - startedAt,
+      })
+    }
   }
 
-  try {
+  await attempt('openbd', async () => {
+    const hit = (await openbd.fetchByIsbns([isbn13], ctx.signal)).get(isbn13)
+    if (hit) current = mergeIsbnResult(current, isbn13, [{ record: hit, score: 1 }], 'openbd')
+    return hit ? 1 : 0
+  })
+  if (settled(current)) return current
+
+  await attempt('googleBooks', async () => {
     const records = await googleBooks.searchByIsbn(isbn13, {
       country: GOOGLE_BOOKS_COUNTRY,
       signal: ctx.signal,
     })
-    const merged = mergeIsbnResult(current, isbn13, scoreIsbnCandidates(isbn13, records))
-    if (merged.status === 'confirmed') return merged
-    current = merged
-  } catch (err) {
-    rethrowAbort(err)
-  }
+    current = mergeIsbnResult(current, isbn13, scoreIsbnCandidates(isbn13, records))
+    return records.length
+  })
+  if (settled(current)) return current
 
-  try {
+  await attempt('ndl', async () => {
     const records = await ndl.searchByIsbn(isbn13, { proxyUrl: NDL_PROXY_URL, signal: ctx.signal })
-    const merged = mergeIsbnResult(current, isbn13, scoreIsbnCandidates(isbn13, records), 'ndl')
-    if (merged.status === 'confirmed') return merged
-    current = merged
-  } catch (err) {
-    rethrowAbort(err)
-  }
+    current = mergeIsbnResult(current, isbn13, scoreIsbnCandidates(isbn13, records), 'ndl')
+    return records.length
+  })
 
   return current
 }
@@ -694,13 +737,24 @@ async function resolveByTitle(entry: BookEntry, ctx: StageContext): Promise<Book
       ? queries
       : [...queries.slice(0, perSource - 1), queries[queries.length - 1]]
 
+  const text = diagnosticText(entry)
   for (const source of order) {
     const records: BibRecord[] = []
     for (const q of attempts) {
+      const startedAt = Date.now()
       try {
-        records.push(...(await runQuery(source, q, ctx)))
+        const got = await runQuery(source, q, ctx)
+        spineDiagnostics.addLookup({
+          at: startedAt, entryText: text, source, query: q.title, mode: q.mode,
+          hits: got.length, ms: Date.now() - startedAt,
+        })
+        records.push(...got)
       } catch (err) {
         rethrowAbort(err)
+        spineDiagnostics.addLookup({
+          at: startedAt, entryText: text, source, query: q.title, mode: q.mode,
+          error: describeError(err), ms: Date.now() - startedAt,
+        })
       }
       if (records.length > 0) break
     }
@@ -708,6 +762,17 @@ async function resolveByTitle(entry: BookEntry, ctx: StageContext): Promise<Book
   }
 
   const merged = mergeSpineResult(entry, bySource)
+  const top = [...(merged.candidates.googleBooks ?? []), ...(merged.candidates.ndl ?? [])].sort(
+    (a, b) => b.score - a.score,
+  )[0]
+  spineDiagnostics.addResolution({
+    at: Date.now(),
+    entryText: text,
+    status: merged.status,
+    topTitle: top?.record.title,
+    topIsbn: top?.record.isbn13,
+    topScore: top ? Math.round(top.score * 100) / 100 : undefined,
+  })
   return enrichFromOpenBd(merged, ctx)
 }
 

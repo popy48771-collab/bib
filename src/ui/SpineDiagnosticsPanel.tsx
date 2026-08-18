@@ -3,6 +3,7 @@ import {
   buildReport,
   spineDiagnostics,
   type FrameDiagnostic,
+  type LookupDiagnostic,
 } from '../lib/spine/diagnostics'
 
 /**
@@ -89,18 +90,44 @@ function DiagnosticFrameView({ frame }: { frame: FrameDiagnostic }) {
   )
 }
 
+/** 照合1リクエストぶんの表示。失敗と0件を見分けられる形で出す */
+function LookupLine({ lookup }: { lookup: LookupDiagnostic }) {
+  const outcome = lookup.error ? `失敗: ${lookup.error}` : `${lookup.hits} 件`
+  return (
+    <li>
+      <span className="diagnostics__text">
+        [{lookup.source}/{lookup.mode}] {lookup.query || '（空）'} → {outcome}
+      </span>
+      <span className="diagnostics__meta">
+        {new Date(lookup.at).toLocaleTimeString('ja-JP')} / {lookup.ms} ms / 対象:{' '}
+        {lookup.entryText || '（不明）'}
+      </span>
+    </li>
+  )
+}
+
 export default function SpineDiagnosticsPanel() {
   const frames = useSyncExternalStore(
     (listener) => spineDiagnostics.subscribe(listener),
     () => spineDiagnostics.list(),
     () => spineDiagnostics.list(),
   )
+  const lookups = useSyncExternalStore(
+    (listener) => spineDiagnostics.subscribe(listener),
+    () => spineDiagnostics.listLookups(),
+    () => spineDiagnostics.listLookups(),
+  )
+  const resolutions = useSyncExternalStore(
+    (listener) => spineDiagnostics.subscribe(listener),
+    () => spineDiagnostics.listResolutions(),
+    () => spineDiagnostics.listResolutions(),
+  )
   const [saving, setSaving] = useState(false)
 
   const save = useCallback(async () => {
     setSaving(true)
     try {
-      const report = buildReport(frames)
+      const report = buildReport(frames, Date.now(), lookups, resolutions)
       // 画像は data URL で足す。これが無いと、あとから見返しても
       // 「その文字列がどの画像から出たのか」が判らない
       const withImages = {
@@ -131,7 +158,7 @@ export default function SpineDiagnosticsPanel() {
     } finally {
       setSaving(false)
     }
-  }, [frames])
+  }, [frames, lookups, resolutions])
 
   return (
     <section className="section" aria-labelledby="diagnostics-title">
@@ -148,7 +175,7 @@ export default function SpineDiagnosticsPanel() {
           type="button"
           className="button button--neutral"
           onClick={() => void save()}
-          disabled={frames.length === 0 || saving}
+          disabled={(frames.length === 0 && lookups.length === 0) || saving}
         >
           診断データを書き出す
         </button>
@@ -156,7 +183,7 @@ export default function SpineDiagnosticsPanel() {
           type="button"
           className="button button--neutral"
           onClick={() => spineDiagnostics.clear()}
-          disabled={frames.length === 0}
+          disabled={frames.length === 0 && lookups.length === 0}
         >
           診断データを消す
         </button>
@@ -170,6 +197,41 @@ export default function SpineDiagnosticsPanel() {
             <DiagnosticFrameView key={frame.id} frame={frame} />
           ))}
         </ol>
+      )}
+
+      {/*
+        読めても書誌が引けないときに見る場所。中継の403・0件・例外を
+        区別できる形で、1リクエストずつ残す
+      */}
+      {lookups.length > 0 && (
+        <>
+          <h3 className="subheading">書誌照合のリクエスト（直近 {lookups.length} 件）</h3>
+          <ol className="diagnostics__strips">
+            {[...lookups].reverse().map((lookup, i) => (
+              <LookupLine key={`${lookup.at}-${i}`} lookup={lookup} />
+            ))}
+          </ol>
+        </>
+      )}
+
+      {resolutions.length > 0 && (
+        <>
+          <h3 className="subheading">照合の着地点（直近 {resolutions.length} 冊）</h3>
+          <ol className="diagnostics__strips">
+            {[...resolutions].reverse().map((r, i) => (
+              <li key={`${r.at}-${i}`}>
+                <span className="diagnostics__text">
+                  {r.entryText || '（不明）'} → {r.status}
+                  {r.topTitle
+                    ? ` / 最上位: ${r.topTitle}${r.topIsbn ? ` (${r.topIsbn})` : ''}${
+                        r.topScore !== undefined ? ` 一致度 ${r.topScore}` : ''
+                      }`
+                    : ' / 候補なし'}
+                </span>
+              </li>
+            ))}
+          </ol>
+        </>
       )}
     </section>
   )

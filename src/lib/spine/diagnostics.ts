@@ -37,6 +37,41 @@ export interface StripDiagnostic {
   image?: Blob
 }
 
+/**
+ * 書誌照合1リクエストぶんの記録。
+ *
+ * 実機の報告は「読めない」と「読めても書誌が引けない」が重なって届く。
+ * コマと短冊の記録だけでは後者が見えない（照合の失敗は画面に「見つからず」
+ * としか出ず、**中継の403なのか・0件なのか・例外なのかを区別できない**）。
+ * そこで、どの本にどのクエリを撃って何が返ったかを1リクエストずつ残す。
+ */
+export interface LookupDiagnostic {
+  at: number
+  /** どの本の照合か。行の rawText の先頭 */
+  entryText: string
+  source: 'ndl' | 'googleBooks' | 'openbd'
+  /** 実際に撃ったクエリ（title / any は文字列、isbn は ISBN そのもの） */
+  query: string
+  mode: 'title' | 'any' | 'isbn'
+  /** 返ってきた件数。失敗したときは undefined で error に理由が入る */
+  hits?: number
+  /** 失敗の理由。通信エラー・HTTPエラーなど */
+  error?: string
+  ms: number
+}
+
+/** 1冊ぶんの照合の着地点。クエリの記録と突き合わせて読む */
+export interface ResolutionDiagnostic {
+  at: number
+  entryText: string
+  /** 照合後の状態（confirmed / needsReview / notFound / conflict） */
+  status: string
+  /** 最上位候補。無ければ undefined */
+  topTitle?: string
+  topIsbn?: string
+  topScore?: number
+}
+
 /** コマ1枚ぶんの記録 */
 export interface FrameDiagnostic {
   id: string
@@ -66,6 +101,15 @@ export interface FrameDiagnostic {
 const DEFAULT_LIMIT = 8
 
 /**
+ * 照合の記録の保持件数。
+ *
+ * 1冊で最大 SPINE_MAX_LOOKUPS 回のリクエストが飛び、棚1枚から20〜30冊入る。
+ * 文字列だけなので枚数の制限より緩くてよいが、無制限には持たない。
+ */
+const LOOKUP_LIMIT = 120
+const RESOLUTION_LIMIT = 60
+
+/**
  * 記録の入れ物。
  *
  * 単一の実体を共有する。React の外（OCR の待ち行列の中）から書き込むので、
@@ -76,8 +120,12 @@ export class SpineDiagnosticsLog {
 
   private readonly limit: number
   private frames: FrameDiagnostic[] = []
+  private lookupLog: LookupDiagnostic[] = []
+  private resolutionLog: ResolutionDiagnostic[] = []
   private listeners = new Set<() => void>()
   private snapshot: readonly FrameDiagnostic[] = []
+  private lookupSnapshot: readonly LookupDiagnostic[] = []
+  private resolutionSnapshot: readonly ResolutionDiagnostic[] = []
   private serial = 0
 
   constructor(limit = DEFAULT_LIMIT) {
@@ -88,7 +136,11 @@ export class SpineDiagnosticsLog {
   setEnabled(enabled: boolean): void {
     if (this.enabled === enabled) return
     this.enabled = enabled
-    if (!enabled) this.frames = []
+    if (!enabled) {
+      this.frames = []
+      this.lookupLog = []
+      this.resolutionLog = []
+    }
     this.publish()
   }
 
@@ -139,12 +191,36 @@ export class SpineDiagnosticsLog {
     if (changed) this.publish()
   }
 
+  /** 書誌照合1リクエストぶんを足す */
+  addLookup(lookup: LookupDiagnostic): void {
+    if (!this.enabled) return
+    this.lookupLog = [...this.lookupLog, lookup].slice(-LOOKUP_LIMIT)
+    this.publish()
+  }
+
+  /** 1冊ぶんの照合の着地点を足す */
+  addResolution(resolution: ResolutionDiagnostic): void {
+    if (!this.enabled) return
+    this.resolutionLog = [...this.resolutionLog, resolution].slice(-RESOLUTION_LIMIT)
+    this.publish()
+  }
+
   list(): readonly FrameDiagnostic[] {
     return this.snapshot
   }
 
+  listLookups(): readonly LookupDiagnostic[] {
+    return this.lookupSnapshot
+  }
+
+  listResolutions(): readonly ResolutionDiagnostic[] {
+    return this.resolutionSnapshot
+  }
+
   clear(): void {
     this.frames = []
+    this.lookupLog = []
+    this.resolutionLog = []
     this.publish()
   }
 
@@ -161,6 +237,8 @@ export class SpineDiagnosticsLog {
    */
   private publish(): void {
     this.snapshot = this.frames
+    this.lookupSnapshot = this.lookupLog
+    this.resolutionSnapshot = this.resolutionLog
     for (const listener of this.listeners) listener()
   }
 }
@@ -182,6 +260,10 @@ export interface DiagnosticsReport {
     ms: number
     strips: { index: number; band: SpineBand; text: string; spines: number; ms: number }[]
   }[]
+  /** 書誌照合のリクエスト履歴。読めても書誌が引けないときはここを見る */
+  lookups: (Omit<LookupDiagnostic, 'at'> & { at: string })[]
+  /** 1冊ごとの照合の着地点 */
+  resolutions: (Omit<ResolutionDiagnostic, 'at'> & { at: string })[]
 }
 
 /**
@@ -193,9 +275,13 @@ export interface DiagnosticsReport {
 export function buildReport(
   frames: readonly FrameDiagnostic[],
   generatedAt = Date.now(),
+  lookups: readonly LookupDiagnostic[] = [],
+  resolutions: readonly ResolutionDiagnostic[] = [],
 ): DiagnosticsReport {
   return {
     generatedAt: new Date(generatedAt).toISOString(),
+    lookups: lookups.map((l) => ({ ...l, at: new Date(l.at).toISOString() })),
+    resolutions: resolutions.map((r) => ({ ...r, at: new Date(r.at).toISOString() })),
     frames: frames.map((f) => ({
       id: f.id,
       at: new Date(f.at).toISOString(),
