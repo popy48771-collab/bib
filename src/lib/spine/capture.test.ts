@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import {
   MIN_BRIGHTNESS,
+  RESCUE_AFTER_MS,
+  RESCUE_FORCE_MS,
+  STABLE_TICKS,
   assessFrame,
+  decideCapture,
   blowoutRatio,
   brightness,
   downscale,
@@ -192,6 +196,68 @@ describe('boxToRect', () => {
     const r = boxToRect({ x: 0.5, y: 0.5, width: 0, height: 0 }, 100, 100, 0)
     expect(r.width).toBeGreaterThanOrEqual(1)
     expect(r.height).toBeGreaterThanOrEqual(1)
+  })
+})
+
+describe('decideCapture', () => {
+  const base = {
+    usable: true,
+    moved: 0.2,
+    stable: 0,
+    waitedMs: 0,
+    sharpness: 0.4,
+    bestSharpness: 0.4,
+  }
+
+  it('品質が足りないコマは撮らない', () => {
+    expect(decideCapture({ ...base, usable: false, moved: 0, stable: 5 })).toBe('reject')
+  })
+
+  it('止まったコマが続いたら撮る', () => {
+    expect(decideCapture({ ...base, moved: 0.01, stable: STABLE_TICKS - 1 })).toBe('capture')
+  })
+
+  it('止まりきらないうちは待つ', () => {
+    expect(decideCapture({ ...base, moved: 0.01, stable: 0 })).toBe('wait')
+    expect(decideCapture({ ...base, moved: 0.5, stable: STABLE_TICKS })).toBe('wait')
+  })
+
+  it('待たせすぎたら、そこそこ鮮鋭なコマで妥協して撮る', () => {
+    // 「かざしているのに何も起きない」を潰すための経路
+    const rescued = decideCapture({
+      ...base,
+      moved: 0.5,
+      waitedMs: RESCUE_AFTER_MS,
+      sharpness: 0.4,
+      bestSharpness: 0.4,
+    })
+    expect(rescued).toBe('capture')
+  })
+
+  it('救済でも、そのとき明らかにぶれていれば見送る', () => {
+    const blurred = decideCapture({
+      ...base,
+      moved: 0.5,
+      waitedMs: RESCUE_AFTER_MS,
+      sharpness: 0.1,
+      bestSharpness: 0.5,
+    })
+    expect(blurred).toBe('wait')
+  })
+
+  it('それでも撮れないまま期限が来たら、鮮鋭度を問わず撮る', () => {
+    const forced = decideCapture({
+      ...base,
+      moved: 0.9,
+      waitedMs: RESCUE_FORCE_MS,
+      sharpness: 0.05,
+      bestSharpness: 0.9,
+    })
+    expect(forced).toBe('capture')
+  })
+
+  it('救済の期限が来ても、品質が足りなければ撮らない', () => {
+    expect(decideCapture({ ...base, usable: false, waitedMs: RESCUE_FORCE_MS * 2 })).toBe('reject')
   })
 })
 
