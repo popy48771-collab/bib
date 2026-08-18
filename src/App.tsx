@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { BookEntry, ExtractedSpine, ScoredCandidate } from './types'
 import {
   adoptCandidate,
@@ -26,6 +26,15 @@ import { useSpineScan } from './ui/useSpineScan'
 import type { CroppedImage } from './lib/spine/capture'
 import { Notice, type NoticeKind } from './ui/Notice'
 import { useOnline } from './ui/useOnline'
+import { isDebugEnabled } from './ui/debug'
+import { spineDiagnostics } from './lib/spine/diagnostics'
+
+/**
+ * 実機診断の画面。`?debug=1` のときしか読み込まない。
+ *
+ * 遅延 import にしてあるので、通常の利用者には一切降ってこない。
+ */
+const SpineDiagnosticsPanel = lazy(() => import('./ui/SpineDiagnosticsPanel'))
 
 /** 読み取り方式。いずれも同じ書誌パイプラインへ合流する */
 type InputMode = 'barcode' | 'spine'
@@ -264,6 +273,16 @@ export function App() {
   )
 
   const spineScan = useSpineScan({ active: inputMode === 'spine' && scanning, onSpine })
+
+  /*
+   * 診断の記録を入れるかどうかは URL で決まる。
+   * 付いていないあいだは、記録の関数がすぐ返るので実行時の費用は無い。
+   */
+  const debugging = useMemo(() => isDebugEnabled(), [])
+  useEffect(() => {
+    spineDiagnostics.setEnabled(debugging)
+    return () => spineDiagnostics.setEnabled(false)
+  }, [debugging])
 
   /** 読み取りと照合を合わせた残り。終わったことを伝えるのに使う */
   const totalPending = pending + spineScan.state.pending
@@ -806,6 +825,12 @@ export function App() {
                 )}
               </section>
             </>
+          )}
+
+          {debugging && (
+            <Suspense fallback={null}>
+              <SpineDiagnosticsPanel />
+            </Suspense>
           )}
         </div>
       </main>

@@ -1189,3 +1189,72 @@ code {
   font-family: var(--font-mono);
   font-size: var(--text-note);
 }
+
+/* ── 読み取りの診断（?debug=1 のときだけ） ──────────────── */
+
+/*
+ * 実機で閾値を詰めるための画面。利用者が通常たどる導線には出ない。
+ * 新しい色や角丸は足さず、既存のトークンだけで組む。
+ */
+
+.diagnostics {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.diagnostics__frame {
+  padding: var(--space-3) 0;
+  border-top: 1px solid var(--color-divider);
+}
+
+.diagnostics__heading {
+  margin: 0 0 var(--space-2);
+  font-size: var(--text-note);
+  color: var(--color-text-sub);
+  font-variant-numeric: tabular-nums;
+}
+
+.diagnostics__preview {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  margin: var(--space-2) 0;
+  border: 1px solid var(--color-divider);
+}
+
+.diagnostics__strips {
+  margin: var(--space-2) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.diagnostics__strips > li {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) 0;
+  border-top: 1px solid var(--color-divider);
+}
+
+/* 短冊は縦長なので、高さで揃える。原寸のままだと1本で画面が埋まる */
+.diagnostics__strip {
+  flex: 0 0 auto;
+  height: 96px;
+  width: auto;
+  border: 1px solid var(--color-divider);
+}
+
+.diagnostics__text {
+  flex: 1 1 auto;
+  font-size: var(--text-note);
+  color: var(--color-text);
+  word-break: break-all;
+}
+
+.diagnostics__meta {
+  flex: 0 0 auto;
+  font-size: var(--text-note);
+  color: var(--color-text-weak);
+  font-variant-numeric: tabular-nums;
+}
