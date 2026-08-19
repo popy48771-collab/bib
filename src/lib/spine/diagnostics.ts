@@ -81,8 +81,8 @@ export interface FrameDiagnostic {
   quality?: FrameQuality
   /** 切り出した短冊の範囲 */
   bands: SpineBand[]
-  /** 短冊で読んだか、コマ全体へ退避したか */
-  mode: 'strips' | 'frame'
+  /** Gemini、短冊OCR、コマ全体への退避のどれで読んだか */
+  mode: 'gemini' | 'strips' | 'frame'
   strips: StripDiagnostic[]
   /** そのコマから取れた冊数 */
   spines: number

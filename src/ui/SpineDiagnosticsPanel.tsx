@@ -43,14 +43,21 @@ function toDataUrl(blob: Blob): Promise<string> {
 }
 
 function DiagnosticFrameView({ frame }: { frame: FrameDiagnostic }) {
-  const read = frame.strips.filter((s) => s.spines > 0).length
+  const read =
+    frame.mode === 'gemini' ? frame.spines : frame.strips.filter((s) => s.spines > 0).length
+  const mode =
+    frame.mode === 'gemini'
+      ? 'Gemini（棚全体）'
+      : frame.mode === 'strips'
+        ? '短冊'
+        : 'コマ全体（退避）'
 
   return (
     <li className="diagnostics__frame">
       <p className="diagnostics__heading">
         {new Date(frame.at).toLocaleTimeString('ja-JP')} / {frame.width}×{frame.height} /{' '}
-        {frame.mode === 'strips' ? '短冊' : 'コマ全体（退避）'} / 短冊 {frame.bands.length} 本 /
-        読めた {read} 本 / {frame.spines} 冊 / {frame.ms} ms
+        {mode} / 短冊 {frame.bands.length} 本 / 読めた {read} 本 / {frame.spines} 冊 /{' '}
+        {frame.ms} ms
       </p>
       {frame.quality && (
         <ul className="status-line">

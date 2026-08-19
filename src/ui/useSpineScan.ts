@@ -12,6 +12,7 @@ import { SerialQueue } from '../lib/spine/queue'
 import { toFrameColumns, type SpineBand } from '../lib/spine/segment'
 import { SpineTracker, type SpineSite } from '../lib/spine/tracker'
 import { columnText, spineRawText, spinesFromRecognition, worthNewEntry } from '../lib/spine/parse'
+import { createGeminiRecognizer, hasGeminiApiKey } from '../lib/spine/gemini'
 import { createTesseractRecognizer } from '../lib/spine/tesseract'
 import { SpineRecognizerUnavailableError, type SpineRecognizer } from '../lib/spine/recognizer'
 
@@ -56,12 +57,14 @@ const OCR_QUEUE_CAPACITY = 3
 const MIN_STRIPS = 2
 
 export interface SpineScanState {
-  /** wasm と言語モデルを取りに行っている */
+  /** 読み取り機構を準備している */
   preparing: boolean
   /** OCR を受け付けられる */
   ready: boolean
   /** OCR が使えない理由。ある場合は読み取りを続けても意味がない */
   error: string | null
+  /** 読み取りは続けられるが、方式を切り替えたことなどを知らせる */
+  notice: string | null
   /** OCR 待ちのコマ数 */
   pending: number
   /** 待ち行列が満杯 */
@@ -83,20 +86,34 @@ export interface UseSpineScanOptions {
   onSpine: (spine: ExtractedSpine, crop: CroppedImage | null, sameAs?: string) => string | null
 }
 
+interface RecognizerSession {
+  primary: SpineRecognizer
+  fallback: SpineRecognizer | null
+  remoteDisabled: boolean
+}
+
+/** URL の `?engine=tesseract` は実機比較・障害切り分け用。通常は Gemini を優先する。 */
+function forceLocalRecognizer(): boolean {
+  return new URLSearchParams(window.location.search).get('engine') === 'tesseract'
+}
+
+async function localFallback(session: RecognizerSession): Promise<SpineRecognizer> {
+  if (!session.fallback) session.fallback = createTesseractRecognizer()
+  await session.fallback.prepare()
+  return session.fallback
+}
+
 /**
- * 背表紙の読み取り(OCR)を回す。
+ * 背表紙の読み取りを回す。
  *
- * ── 短冊1本ずつ読み、読めた端から一覧へ出す ─────────────
- * 以前はコマ1枚をまるごと OCR にかけ、読み終えてから 20〜30冊ぶんを
- * 一度に渡していた。**最初の1冊が出るまで十数秒**かかり、そのあいだ
- * 画面は無言だったので、利用者には壊れているのと区別がつかなかった。
+ * ── 主経路は棚全体、退避経路は短冊 ────────────────────
+ * Gemini が構成されていれば、品質判定を通った棚一段を1回だけ送る。
+ * 返った背表紙は位置を保ったまま既存の書誌照合へ渡す。API の認証、上限、
+ * 通信、応答形式のいずれかが失敗したら、そのカメラ起動中は再試行せず、
+ * 端末内 Tesseract に切り替える。
  *
- * いまは背表紙ごとの短冊に切り、1本読むごとに `onSpine` を呼ぶ。
- * 総時間は変わらないが、1冊目は 1 秒足らずで出る。
- *
- * カメラ画面(SpineScanner)からは切り離してある。カメラを閉じた時点で
- * Worker ごと落としてしまうと、待ち行列に残ったコマが消える。
- * ここは画面の外に置き、待ち行列を捌き終えてから Worker を破棄する。
+ * カメラ画面(SpineScanner)からは切り離してある。カメラを閉じても待ち行列に
+ * 残ったコマを捌き終え、それから読み取りセッションを破棄する。
  */
 export function useSpineScan({ active, onSpine }: UseSpineScanOptions): {
   state: SpineScanState
@@ -105,10 +122,11 @@ export function useSpineScan({ active, onSpine }: UseSpineScanOptions): {
   const [preparing, setPreparing] = useState(false)
   const [ready, setReady] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
   const [pending, setPending] = useState(0)
   const [unreadable, setUnreadable] = useState(0)
 
-  const recognizerRef = useRef<SpineRecognizer | null>(null)
+  const sessionRef = useRef<RecognizerSession | null>(null)
   const queueRef = useRef<SerialQueue | null>(null)
   const trackerRef = useRef<SpineTracker>(new SpineTracker())
   /** 取り込んだコマの通し番号。同じコマの中の短冊どうしを束ねないために要る */
@@ -127,18 +145,29 @@ export function useSpineScan({ active, onSpine }: UseSpineScanOptions): {
   useEffect(() => {
     if (!active) return
 
-    const recognizer = createTesseractRecognizer()
+    const remote = hasGeminiApiKey() && !forceLocalRecognizer()
+    const recognizer = remote ? createGeminiRecognizer() : createTesseractRecognizer()
+    const session: RecognizerSession = {
+      primary: recognizer,
+      fallback: null,
+      remoteDisabled: false,
+    }
     const queue = new SerialQueue({
       capacity: OCR_QUEUE_CAPACITY,
       onChange: (n) => setPending(n),
     })
-    recognizerRef.current = recognizer
+    sessionRef.current = session
     queueRef.current = queue
     trackerRef.current = new SpineTracker()
 
     let cancelled = false
     setPreparing(true)
     setError(null)
+    setNotice(
+      remote || forceLocalRecognizer()
+        ? null
+        : 'Gemini API キーが未設定のため、端末内の文字読み取りを使用しています。',
+    )
     setUnreadable(0)
 
     // カメラの許可取得と並行して走らせる。どちらも待たされる処理なので、
@@ -164,17 +193,20 @@ export function useSpineScan({ active, onSpine }: UseSpineScanOptions): {
     return () => {
       cancelled = true
       // 新しい取り込みは受け付けない。ただし積んであるぶんは最後まで読む
-      recognizerRef.current = null
+      if (sessionRef.current === session) sessionRef.current = null
       queueRef.current = null
       setReady(false)
-      void queue.whenIdle().then(() => recognizer.dispose())
+      void queue.whenIdle().then(async () => {
+        await recognizer.dispose()
+        if (session.fallback && session.fallback !== recognizer) await session.fallback.dispose()
+      })
     }
   }, [active])
 
   const capture = useCallback((frame: FrameCapture): CaptureOutcome => {
     const queue = queueRef.current
-    const recognizer = recognizerRef.current
-    if (!queue || !recognizer) return 'unavailable'
+    const session = sessionRef.current
+    if (!queue || !session) return 'unavailable'
 
     const tracker = trackerRef.current
     // 同じ構図を撮り続けても、読み直しは1回で済ませる
@@ -228,8 +260,76 @@ export function useSpineScan({ active, onSpine }: UseSpineScanOptions): {
        */
       let recognized = 0
 
+      /** 棚全体から返った背表紙を、位置どおりに切り出して一覧へ渡す。 */
+      const emitFrameSpines = async (spines: ExtractedSpine[]) => {
+        if (spines.length === 0) return
+        let crops: (CroppedImage | null)[] = spines.map(() => null)
+        try {
+          crops = await cropBoxes(
+            frame.blob,
+            spines.map((spine) => spine.box),
+          )
+        } catch {
+          /* 画像が無くても書名は出せる */
+        }
+
+        for (const [index, spine] of spines.entries()) {
+          recognized++
+          const band = spine.box
+            ? {
+                start: Math.max(0, Math.min(1, spine.box.x)),
+                end: Math.max(0, Math.min(1, spine.box.x + spine.box.width)),
+              }
+            : undefined
+          if (emit(spine, crops[index] ?? null, band)) produced++
+        }
+      }
+
+      let recognizer = session.primary
+      if (session.remoteDisabled) {
+        try {
+          recognizer = await localFallback(session)
+        } catch (err) {
+          setError(
+            err instanceof SpineRecognizerUnavailableError
+              ? err.message
+              : '端末内の文字読み取りへ切り替えられませんでした。',
+          )
+          return
+        }
+      }
+
+      // ── 本筋: Gemini に棚全体を1枚だけ渡す ─────────────────
+      if (recognizer.strategy === 'wholeFrame') {
+        spineDiagnostics.update(diagnosticId, { mode: 'gemini' })
+        try {
+          const rec = await recognizer.recognize(frame.blob, {
+            width: frame.width,
+            height: frame.height,
+          })
+          await emitFrameSpines(spinesFromRecognition(rec, 'remoteVision'))
+        } catch {
+          // 認証・利用上限・通信・応答形式のどれが原因でも、撮った棚を捨てない。
+          session.remoteDisabled = true
+          setNotice(
+            'Gemini で読み取れなかったため、この読み取りでは端末内の文字読み取りへ切り替えました。',
+          )
+          try {
+            recognizer = await localFallback(session)
+          } catch (err) {
+            setError(
+              err instanceof SpineRecognizerUnavailableError
+                ? err.message
+                : '端末内の文字読み取りへ切り替えられませんでした。',
+            )
+            return
+          }
+        }
+      }
+
       // ── 本筋: 背表紙ごとの短冊を1本ずつ読む ──────────────
-      if (frame.bands.length >= MIN_STRIPS) {
+      if (recognizer.strategy === 'segmented' && frame.bands.length >= MIN_STRIPS) {
+        spineDiagnostics.update(diagnosticId, { mode: 'strips' })
         let strips: SpineStrip[] = []
         try {
           strips = await cropStrips(frame.blob, frame.bands)
@@ -283,7 +383,7 @@ export function useSpineScan({ active, onSpine }: UseSpineScanOptions): {
        * 切れてはいたが1本も読めなかった場合の受け皿。
        * 極性の混在には弱いが、以前はこれだけで動いていた経路なので残す。
        */
-      if (recognized === 0) {
+      if (recognizer.strategy === 'segmented' && recognized === 0) {
         spineDiagnostics.update(diagnosticId, { mode: 'frame' })
         let spines: ExtractedSpine[] = []
         try {
@@ -297,22 +397,7 @@ export function useSpineScan({ active, onSpine }: UseSpineScanOptions): {
           spines = []
         }
 
-        if (spines.length > 0) {
-          // 確認用の画像を1冊ずつ切り出す。失敗しても一覧の作成は止めない
-          let crops: (CroppedImage | null)[] = spines.map(() => null)
-          try {
-            crops = await cropBoxes(
-              frame.blob,
-              spines.map((s) => s.box),
-            )
-          } catch {
-            /* 画像が無くても書名は出せる */
-          }
-          for (const [i, spine] of spines.entries()) {
-            recognized++
-            if (emit(spine, crops[i] ?? null)) produced++
-          }
-        }
+        await emitFrameSpines(spines)
       }
 
       spineDiagnostics.update(diagnosticId, { spines: produced, ms: Date.now() - startedAt })
@@ -324,7 +409,15 @@ export function useSpineScan({ active, onSpine }: UseSpineScanOptions): {
 
   return {
     // busy は ref ではなく state から導く。ref を描画で読んでも再描画されない
-    state: { preparing, ready, error, pending, busy: pending >= OCR_QUEUE_CAPACITY, unreadable },
+    state: {
+      preparing,
+      ready,
+      error,
+      notice,
+      pending,
+      busy: pending >= OCR_QUEUE_CAPACITY,
+      unreadable,
+    },
     capture,
   }
 }

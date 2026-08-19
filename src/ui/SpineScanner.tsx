@@ -34,6 +34,8 @@ interface Props {
   preparing: boolean
   /** OCR が使えない理由 */
   ocrError: string | null
+  /** 読み取り方式の切り替えなど、処理を止めない知らせ */
+  recognitionNotice: string | null
   /** OCR 待ちのコマ数 */
   ocrPending: number
   /** 書誌照合待ちの件数 */
@@ -93,8 +95,8 @@ function monitorGray(image: ImageData): GrayImage {
  * ── 1枚に棚一段 ─────────────────────────────────────
  * 以前は画面中央の細い帯(読取レーン)を通った本だけを取り込んでいたが、
  * 実測するとその帯には約5冊が入っており、混ざった画像を1冊として
- * OCR にかけていた。いまはフレーム全体を渡し、Tesseract のレイアウト解析に
- * 背表紙を1冊ずつの縦列へ分けさせている(lib/spine/capture.ts の冒頭)。
+ * OCR にかけていた。いまはフレーム全体を Gemini に渡し、背表紙を1冊ずつ
+ * 構造化して受け取る。Gemini が利用できないときだけ端末内 OCR へ退避する。
  *
  * そのため操作も変わる。棚に沿って流し続けるのではなく、
  * **棚の一段を枠に収めて少し止める** → 読み取る → 次の段へ、という流れになる。
@@ -108,6 +110,7 @@ function monitorGray(image: ImageData): GrayImage {
 export function SpineScanner({
   preparing,
   ocrError,
+  recognitionNotice,
   ocrPending,
   lookupPending,
   busy,
@@ -388,6 +391,12 @@ export function SpineScanner({
           <span className="scanner-status__label">{status.label}</span>
           {status.detail && <span className="scanner-status__detail">{status.detail}</span>}
         </p>
+      )}
+
+      {!error && recognitionNotice && (
+        <Notice kind="info" live="status">
+          {recognitionNotice}
+        </Notice>
       )}
 
       {(captured > 0 || ocrPending > 0 || lookupPending > 0 || unreadable > 0) && (
